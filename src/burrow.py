@@ -1341,6 +1341,10 @@ def process_view():
 
 
 def cmd_processes(query):
+    q = query.strip()
+    low = q.lower()
+    if q.startswith(":") or low in ("port", "ports") or low.startswith(("port ", "ports ")):
+        return cmd_ports(q[1:] if q.startswith(":") else q.split(None, 1)[1] if " " in q else "")
     view = process_view()
     procs = engine.list_processes()
     if view["group"]:
@@ -1353,6 +1357,9 @@ def cmd_processes(query):
     rows.sort(key=key)
     q = query.strip()
     items = []
+    if q.isdigit():  # a port number comes before PIDs that start with it
+        items += [port_item(r) for r in engine.listening_ports()[0] if r["port"] == int(q)]
+    ports_found = len(items)
     if not q:
         other = "memory" if view["sort"] == "cpu" else "CPU"
         items.append(item(
@@ -1366,6 +1373,9 @@ def cmd_processes(query):
             },
             uid="processes-summary",
         ))
+        items.append(quit_all_item())
+        items.append(item("Listening Ports", "Which program holds :3000, :8080… · ↩ Show them (or type :)",
+                          icon("network"), valid=False, autocomplete=":", uid="processes-ports"))
     shown = 0
     for r in rows:
         if q.isdigit():
@@ -1403,9 +1413,85 @@ def cmd_processes(query):
             text={"copy": r["path"], "largetype": "{}\nPID {}\n{}".format(r["name"], ", ".join(str(p) for p in r["pids"][:40]), r["path"])},
             quicklook=None,
         ))
-    if q and not shown:
+    if q and not shown and not ports_found:
         items.append(item("No Matching Process", "Type part of a name, a PID, or a path with /", icon("search"), valid=False))
     emit(items)
+
+
+def port_item(r):
+    name = os.path.basename(r["app"])[:-4] if r["app"] else r["command"]
+    others = r["uid"] is not None and r["uid"] != os.getuid()
+    details = [r["proto"], ", ".join(r["addresses"]), "PID {}".format(r["pid"])]
+    if r["app"] and name != r["command"]:
+        details.append(r["command"])
+    if others:
+        details.append("🔒 " + ("root" if r["uid"] == 0 else "another user"))
+    if r["system"]:
+        details.append("⚠️ part of macOS")
+    url = "http://localhost:{}".format(r["port"])
+    payload = {"pids": [r["pid"]], "pid": r["pid"], "path": r["path"] or r["command"], "app": None, "name": name, "critical": r["system"]}
+    return item(
+        ":{}  —  {}".format(r["port"], name),
+        " · ".join(details + ["↩ End", "fn↩ Open in browser"]),
+        file_icon(r["app"]) if r["app"] else icon("warning" if r["system"] else "network"),
+        act("proc_quit", name, force=False, **payload),
+        mods={
+            "alt": mod("Force quit — unsaved changes are lost" + (" · 🔒 asks for your password" if others else ""),
+                       act("proc_quit", name, force=True, **payload)),
+            "cmd": mod("Reveal the program in Finder", act("reveal", r["path"])) if r["path"] else mod("Program path unknown", {}, valid=False),
+            "ctrl": mod("Copy the PID ({})".format(r["pid"]), act("copy", str(r["pid"]))),
+            "fn": mod("Open {} in your browser".format(url), act("open", url)),
+        },
+        text={"copy": "localhost:{}".format(r["port"]), "largetype": "{}\n:{} · PID {}\n{}".format(name, r["port"], r["pid"], r["path"])},
+    )
+
+
+def cmd_ports(query):
+    rows, all_users = engine.listening_ports()
+    q = query.strip()
+    shown = [r for r in rows if not q or (q.isdigit() and str(r["port"]).startswith(q)) or matches(q, r["command"], r["app"] or "", str(r["port"]))]
+    items = [item("..", "Back to all processes", icon("back"), valid=False, autocomplete="")]
+    items.append(item(
+        "{}  —  {}".format(plural(len(rows), "Listening Port"), "every user" if all_users else "yours only"),
+        "Every user's ports are shown for a couple of minutes" if all_users
+        else "Other users' programs (root…) are hidden without your password · ↩ Show all (asks for your password)",
+        icon("network"), None if all_users else act("ports_all"), valid=not all_users, uid="ports-summary",
+    ))
+    items += [port_item(r) for r in shown]
+    if not shown:
+        items.append(item("No Listening Ports" if not q else "No Matching Port", "Nothing is waiting for connections" if not q else "Type a port number or a program name", icon("check"), valid=False))
+    emit(items)
+
+
+def quit_all_item():
+    apps = engine.foreground_apps()
+    exclude = os.environ.get("quit_exclude", "")
+    every = engine.apps_to_quit(apps, False, exclude)
+    others = engine.apps_to_quit(apps, True, exclude)
+    front = next((a["name"] for a in apps if a["front"]), None)
+    return item(
+        "Quit All Apps  —  {} open".format(len(every)),
+        "↩ Quit them all · ⌥↩ All except {} · each can ask to save · Finder, Alfred and your exclusions stay".format(front or "the front app"),
+        icon("process"), act("quit_all", "", except_front=False),
+        mods={"alt": mod("Quit {} (all except {})".format(plural(len(others), "app"), front or "the front app"), act("quit_all", "", except_front=True))},
+        uid="processes-quit-all",
+    )
+
+
+def quit_all(except_front):
+    apps = engine.apps_to_quit(engine.foreground_apps(), except_front, os.environ.get("quit_exclude", ""))
+    if not apps:
+        return "No apps to quit"
+    names = ", ".join(a["name"] for a in apps[:20]) + ("…" if len(apps) > 20 else "")
+    if not confirm("Quit {}?".format(plural(len(apps), "app")),
+                   "{}\n\nEach app quits normally, so ones with unsaved changes can ask you to save.".format(names), "Quit All"):
+        return None
+    alive = engine.quit_apps(apps)
+    done = len(apps) - len(alive)
+    msg = "Quit {}".format(plural(done, "app"))
+    if alive:
+        msg += " · still open: {} (may be asking to save)".format(", ".join(a["name"] for a in alive[:6]))
+    return msg
 
 
 def proc_quit(p, force):
@@ -2288,6 +2374,11 @@ def dispatch(action, target, p):
         if msg:
             alfred_search(KEYWORDS["processes"] + " ")
         return msg
+    elif action == "quit_all":
+        return quit_all(bool(p.get("except_front")))
+    elif action == "ports_all":
+        if engine.load_all_ports():
+            alfred_search(KEYWORDS["processes"] + " :")
     elif action == "proc_restart":
         return proc_restart(p)
     elif action == "proc_view":

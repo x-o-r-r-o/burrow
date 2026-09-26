@@ -80,5 +80,81 @@ class EndTest(unittest.TestCase):
         self.assertIsNone(self.proc.poll())
 
 
+LSOF_SAMPLE = """p100
+cnode
+u501
+f20
+PTCP
+n127.0.0.1:3000
+f21
+PTCP
+n[::1]:3000
+p200
+cControlCenter
+u501
+f9
+PTCP
+n*:7000
+"""
+
+
+class PortsTest(unittest.TestCase):
+    def test_parse_merges_addresses(self):
+        rows = engine.parse_lsof_ports(LSOF_SAMPLE)
+        self.assertEqual([(r["port"], r["pid"], r["command"]) for r in rows], [(3000, 100, "node"), (7000, 200, "ControlCenter")])
+        self.assertEqual(rows[0]["addresses"], ["127.0.0.1", "::1"])
+        self.assertEqual(rows[1]["addresses"], ["*"])
+
+    def test_real_server_shows_up_and_ends(self):
+        burrow.confirm = lambda *a, **k: True
+        burrow.alfred_search = lambda *a, **k: None
+        server = subprocess.Popen([sys.executable, "-c",
+                                   "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(); "
+                                   "print(s.getsockname()[1], flush=True); time.sleep(300)"], stdout=subprocess.PIPE)
+        try:
+            port = int(server.stdout.readline())
+            row = next((r for r in engine.listening_ports()[0] if r["port"] == port), None)
+            self.assertIsNotNone(row, "the test server's port is listed")
+            self.assertEqual(row["pid"], server.pid)
+            self.assertFalse(row["system"])
+            item = burrow.port_item(row)
+            self.assertEqual(item["mods"]["fn"]["variables"]["target"], "http://localhost:{}".format(port))
+            payload = {k: v for k, v in __import__("json").loads(item["variables"]["payload"]).items()}
+            self.assertEqual(burrow.proc_quit(payload, False), "Ended " + payload["name"])
+            server.wait(timeout=5)
+        finally:
+            if server.poll() is None:
+                server.kill()
+            server.wait()
+
+
+class QuitAllTest(unittest.TestCase):
+    APPS = [
+        {"name": "Finder", "bundle_id": "com.apple.finder", "path": "", "pid": 1, "front": False},
+        {"name": "Music", "bundle_id": "com.apple.Music", "path": "", "pid": 2, "front": False},
+        {"name": "Notes", "bundle_id": "com.apple.Notes", "path": "", "pid": 3, "front": True},
+        {"name": "Terminal", "bundle_id": "com.apple.Terminal", "path": "", "pid": 4, "front": False},
+    ]
+
+    def test_exclusions(self):
+        names = lambda apps: [a["name"] for a in apps]  # noqa: E731
+        self.assertEqual(names(engine.apps_to_quit(self.APPS)), ["Music", "Notes", "Terminal"])
+        self.assertEqual(names(engine.apps_to_quit(self.APPS, except_front=True)), ["Music", "Terminal"])
+        self.assertEqual(names(engine.apps_to_quit(self.APPS, exclude="music, com.apple.terminal")), ["Notes"])
+
+    def test_quits_a_real_app(self):
+        subprocess.run(["/usr/bin/open", "-g", "-a", "Calculator"])
+        calc = None
+        for _ in range(20):
+            calc = next((a for a in engine.foreground_apps() if a["bundle_id"] == "com.apple.calculator"), None)
+            if calc:
+                break
+            time.sleep(0.25)
+        self.assertIsNotNone(calc, "Calculator is listed as an open app")
+        time.sleep(1.5)  # let it finish launching
+        self.assertEqual(engine.quit_apps([calc]), [])
+        self.assertFalse(any(a["bundle_id"] == "com.apple.calculator" for a in engine.foreground_apps()))
+
+
 if __name__ == "__main__":
     unittest.main()

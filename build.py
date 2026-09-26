@@ -231,6 +231,13 @@ def build_plist(icon_for):
                 "config": {"default": "3", "pairs": [["1 Second", "1"], ["3 Seconds", "3"], ["5 Seconds", "5"]]},
             },
             {
+                "type": "textfield",
+                "variable": "quit_exclude",
+                "label": "Quit All Exclusions",
+                "description": "Apps Processes' “Quit All Apps” leaves open: names or bundle IDs, comma-separated. Finder, Alfred and Burrow Companion always stay.",
+                "config": {"default": "", "placeholder": "Music, com.apple.Terminal", "required": False, "trim": True},
+            },
+            {
                 "type": "checkbox",
                 "variable": "confirm_force",
                 "label": "Force Quit",

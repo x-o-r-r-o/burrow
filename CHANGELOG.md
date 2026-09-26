@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0
+
+- **Ports** in `bukill`: type `:` (or `ports`, or a port number) to see which program holds each listening port, then end or force quit it, open it in your browser, reveal it or copy its PID. Every user's ports can be shown after one password or Touch ID prompt, and ports held by parts of macOS are marked and ask first.
+- **Quit All Apps** in `bukill`: quit every open app normally (↩) or all except the one you're using (⌥↩). Finder, Alfred, Burrow Companion and a new **Quit All Exclusions** setting stay open, and Burrow lists any app still open afterwards.
+
 ## 1.4.2
 
 - **Touch ID for sudo** (`butouchid`) couldn't be turned on: macOS now only allows changing `/etc/pam.d` from Terminal, so Burrow showed a “Couldn't change” error. When macOS blocks it, Burrow opens Terminal with the command ready for your password.

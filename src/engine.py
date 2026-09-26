@@ -2680,6 +2680,132 @@ def process_matches(pid, path):
     return bool(comm) and (comm == path or comm.startswith(path.rstrip("/") + "/"))
 
 
+SYSTEM_PREFIXES = ("/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/", "/usr/bin/", "/Library/Apple/")
+LSOF_PORTS = ["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcuPn"]
+
+
+def parse_lsof_ports(text):
+    """`lsof -F pcuPn` output -> [{port, pid, uid, command, proto, addresses}], one per port and process."""
+    rows, pid, cmd, uid, proto = {}, None, "", None, "TCP"
+    for line in text.splitlines():
+        if not line:
+            continue
+        tag, val = line[0], line[1:]
+        if tag == "p":
+            pid = int(val) if val.isdigit() else None
+        elif tag == "c":
+            cmd = val
+        elif tag == "u":
+            uid = int(val) if val.isdigit() else None
+        elif tag == "P":
+            proto = val
+        elif tag == "n" and pid is not None and ":" in val and "->" not in val:
+            addr, _, port = val.rpartition(":")
+            if not port.isdigit():
+                continue
+            key = (int(port), pid, proto)
+            row = rows.setdefault(key, {"port": int(port), "pid": pid, "uid": uid, "command": cmd, "proto": proto, "addresses": []})
+            addr = addr.strip("[]") or "*"
+            if addr not in row["addresses"]:
+                row["addresses"].append(addr)
+    return sorted(rows.values(), key=lambda r: (r["port"], r["pid"]))
+
+
+PORTS_ADMIN = "ports-admin.json"
+
+
+def listening_ports():
+    """Listening TCP ports with the program behind each. Without admin rights lsof only
+    sees your own processes; after "Show all" (one password or Touch ID prompt) every
+    user's are shown for a couple of minutes. Returns (rows, all_users)."""
+    snap = load_state(PORTS_ADMIN)
+    all_users = time.time() - snap.get("t", 0) < 120 and bool(snap.get("out"))
+    rows = parse_lsof_ports(snap["out"] if all_users else sh(LSOF_PORTS))
+    paths = {p["pid"]: p for p in _ps_processes()}
+    for r in rows:
+        proc = paths.get(r["pid"], {})
+        r["path"] = proc.get("path", "")
+        r["uid"] = r["uid"] if r["uid"] is not None else proc.get("uid")
+        r["app"] = app_bundle_of(r["path"])
+        r["system"] = r["path"].startswith(SYSTEM_PREFIXES) or r["command"] in CRITICAL_PROCESSES
+    return rows, all_users
+
+
+def load_all_ports():
+    """Read every user's listening ports once, with the administrator prompt."""
+    ok, out = run_as_admin(" ".join(LSOF_PORTS), "Burrow needs your password to see every user's open ports.")
+    if ok is None:
+        return None
+    save_state(PORTS_ADMIN, {"t": time.time(), "out": out})
+    return True
+
+
+def foreground_apps():
+    """Open apps that have a Dock icon (not menu bar agents or background helpers):
+    [{name, bundle_id, path, pid, front}]."""
+    front = sh(["/usr/bin/lsappinfo", "front"]).strip().rstrip(":")
+    apps, cur = [], None
+    for line in sh(["/usr/bin/lsappinfo", "list"]).splitlines():
+        m = re.match(r'\s*\d+\) "(.*)" (ASN:[0-9a-fx]+-[0-9a-fx]+)', line)
+        if m:
+            cur = {"name": m.group(1), "asn": m.group(2), "bundle_id": "", "path": "", "pid": None, "type": ""}
+            apps.append(cur)
+            continue
+        if cur is None:
+            continue
+        for key, pattern in (("bundle_id", r'bundleID="([^"]*)"'), ("path", r'bundle path="([^"]*)"'), ("type", r'type="([^"]*)"')):
+            m = re.search(pattern, line)
+            if m:
+                cur[key] = m.group(1)
+        m = re.search(r"\bpid = (\d+)", line)
+        if m:
+            cur["pid"] = int(m.group(1))
+    out = []
+    for a in apps:
+        if a["type"] == "Foreground" and a["pid"]:
+            out.append({"name": a["name"], "bundle_id": a["bundle_id"], "path": a["path"], "pid": a["pid"], "front": a["asn"] == front})
+    return out
+
+
+# Never quit by "Quit All": they're what you're using to quit, or quitting them logs you out
+QUIT_ALL_KEEP = {"com.apple.finder", "com.runningwithcrayons.Alfred", "io.github.burrow-alfred.companion", "com.apple.loginwindow"}
+
+
+def apps_to_quit(apps, except_front=False, exclude=""):
+    keep = {x.strip().lower() for x in exclude.split(",") if x.strip()}
+    out = []
+    for a in apps:
+        if a["bundle_id"] in QUIT_ALL_KEEP or (except_front and a["front"]):
+            continue
+        if a["name"].lower() in keep or a["bundle_id"].lower() in keep:
+            continue
+        out.append(a)
+    return out
+
+
+def quit_apps(apps, wait=10):
+    """Ask apps to quit all at once (each can still ask to save), then wait.
+    Returns the ones still open."""
+    lines = ["on run argv", "ignoring application responses", "repeat with b in argv",
+             "try", "tell application id (b as text) to quit", "end try", "end repeat", "end ignoring", "end run"]
+    cmd = ["/usr/bin/osascript"]
+    for line in lines:
+        cmd += ["-e", line]
+
+    def ask(targets):
+        subprocess.run(cmd + [a["bundle_id"] for a in targets if a["bundle_id"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    ask(apps)
+    start = time.time()
+    alive, asked_again = list(apps), False
+    while alive and time.time() - start < wait:
+        time.sleep(0.5)
+        alive = [a for a in alive if _pid_alive(a["pid"])]
+        if alive and not asked_again and time.time() - start > 3:
+            ask(alive)  # an app that was still starting up may have missed the first request
+            asked_again = True
+    return alive
+
+
 def signal_processes(pids, sig, prompt):
     """Send a signal; processes owned by another user (root…) go through the macOS
     password prompt. Returns (still running pids, cancelled)."""

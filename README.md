@@ -129,6 +129,23 @@ See what's using your Mac's CPU and memory via the `bukill` keyword. CPU is meas
 * <kbd>⌘</kbd><kbd>↩</kbd> Reveal in Finder. <kbd>⌃</kbd><kbd>↩</kbd> Copy the path. <kbd>⌘</kbd><kbd>L</kbd> Show its PIDs.
 * On the top row, <kbd>↩</kbd> sorts by CPU or memory and <kbd>⌥</kbd><kbd>↩</kbd> groups or ungroups helper processes.
 
+**Quit All Apps** on the top row quits every open app normally, so apps with unsaved changes can ask you to save.
+
+* <kbd>↩</kbd> Quit all apps.
+* <kbd>⌥</kbd><kbd>↩</kbd> Quit all except the app you're using.
+
+Finder, Alfred and Burrow Companion always stay open. Add more under **Quit All Exclusions** in the Workflow’s Configuration (app names or bundle IDs, comma-separated). Burrow tells you which apps are still open afterwards.
+
+See which program holds a port via the `bukill` keyword followed by `:` (or `ports`), or type a port number. Each row shows the address and the program behind it.
+
+* <kbd>↩</kbd> End the program. <kbd>⌥</kbd><kbd>↩</kbd> Force quit it.
+* <kbd>fn</kbd><kbd>↩</kbd> Open `http://localhost:PORT` in your browser.
+* <kbd>⌘</kbd><kbd>↩</kbd> Reveal the program in Finder. <kbd>⌃</kbd><kbd>↩</kbd> Copy the PID. <kbd>⌘</kbd><kbd>C</kbd> Copy `localhost:PORT`.
+
+macOS only shows you your own programs' ports; press <kbd>↩</kbd> on the top row to see every user's, which asks for your password (or Touch ID). Ports held by parts of macOS, such as AirPlay's 5000 and 7000, are marked ⚠️ and ask before ending.
+
+![Listening ports](images/about/ports.png)
+
 Processes owned by another user (🔒) ask for your password through the standard macOS prompt. Parts of macOS whose ending would log you out or freeze the Mac (⚠️) get a warning first. If a process has already exited and its PID was reused, Burrow leaves the new process alone.
 
 ![Processes](images/about/processes.png)

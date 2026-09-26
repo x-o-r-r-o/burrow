@@ -1,12 +1,46 @@
-// Burrow's window: App Updates and Browsers.
-// Usage: BurrowWindow <workflow folder> [updates|browsers]
-// All work is done by the workflow's Python (updates.py / browsers.py "cli" commands),
-// so the window has exactly the same safety checks as Alfred.
+// Burrow Companion: the optional menu bar icon and window for the Burrow Alfred workflow.
+//
+// It finds the installed Burrow workflow in Alfred's preferences and runs its Python
+// (engine.py, updates.py, browsers.py), so every action has the same safety checks as
+// Alfred. Open sections with burrow-companion://updates or burrow-companion://browsers.
 import AppKit
+import ServiceManagement
 import SwiftUI
 
-let workflowDir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : FileManager.default.currentDirectoryPath
-let startSection = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "updates"
+let workflowBundleID = "io.github.burrow-alfred"
+let releasesURL = URL(string: "https://github.com/x-o-r-r-o/burrow/releases/latest")!
+var startSection = "updates"
+
+/// The installed Burrow workflow folder (Alfred may keep its preferences in a synced folder).
+func findWorkflow() -> String? {
+    let fm = FileManager.default
+    let home = NSHomeDirectory()
+    var roots: [String] = []
+    if let data = fm.contents(atPath: home + "/Library/Application Support/Alfred/prefs.json"),
+       let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+       let current = obj["current"] as? String {
+        roots.append((current as NSString).expandingTildeInPath)
+    }
+    roots.append(home + "/Library/Application Support/Alfred/Alfred.alfredpreferences")
+    for root in roots {
+        let dir = root + "/workflows"
+        for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
+            let info = NSDictionary(contentsOfFile: dir + "/" + name + "/info.plist")
+            if info?["bundleid"] as? String == workflowBundleID { return dir + "/" + name }
+        }
+    }
+    return nil
+}
+
+var workflowDir: String { findWorkflow() ?? "" }
+
+/// Environment for the workflow's Python: the same cache folder Alfred gives it.
+func workflowEnvironment() -> [String: String] {
+    var env = ProcessInfo.processInfo.environment
+    env["alfred_workflow_bundleid"] = workflowBundleID
+    env["alfred_workflow_cache"] = NSHomeDirectory() + "/Library/Caches/com.runningwithcrayons.Alfred/Workflow Data/" + workflowBundleID
+    return env
+}
 
 // MARK: - Talking to Python
 
@@ -17,6 +51,7 @@ func runCLI(_ script: String, _ args: [String], onLine: @escaping ([String: Any]
         p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         p.arguments = [workflowDir + "/" + script, "cli"] + args
         p.currentDirectoryURL = URL(fileURLWithPath: workflowDir)
+        p.environment = workflowEnvironment()
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
@@ -71,7 +106,6 @@ final class UpdatesModel: ObservableObject {
     @Published var unknown = 0
     @Published var ignored: [(String, String)] = []
     @Published var history: [(id: String, label: String, time: Double)] = []
-    @Published var selfUpdate: String?
     @Published var mode = "notify"
     @Published var loading = false
     @Published var progress: [String: String] = [:]   // path -> "Downloading…" / "Updated" / error
@@ -79,7 +113,6 @@ final class UpdatesModel: ObservableObject {
     @Published var message: String?
     @Published var hasMas = true
     @Published var hasBrew = false
-    @Published var installingMas = false
     @Published var loadedOnce = false
 
     func load(check: Bool = false) {
@@ -97,7 +130,6 @@ final class UpdatesModel: ObservableObject {
             }
             self.ignored = (o["ignored"] as? [[String: Any]] ?? []).map { ($0["bundle_id"] as? String ?? "", $0["rule"] as? String ?? "") }
             self.history = (o["history"] as? [[String: Any]] ?? []).map { (id: $0["id"] as? String ?? "", label: $0["label"] as? String ?? "", time: $0["time"] as? Double ?? 0) }
-            self.selfUpdate = (o["self"] as? [String: Any])?["version"] as? String
             self.hasMas = o["mas"] as? Bool ?? true
             if let e = o["error"] as? String { self.message = e }
             self.hasBrew = o["brew"] as? Bool ?? false
@@ -127,14 +159,10 @@ final class UpdatesModel: ObservableObject {
         }, done: { self.load() })
     }
 
-    func installMas() {
-        installingMas = true
-        runCLI("updates.py", ["install-mas"], onLine: { o in self.message = (o["done"] ?? o["error"]) as? String },
-               done: { self.installingMas = false; self.load() })
-    }
-
-    func selfUpdateNow() {
-        runCLI("updates.py", ["self-update"], onLine: { o in self.message = (o["done"] ?? o["error"]) as? String })
+    func copyMasCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("brew install mas", forType: .string)
+        message = "Copied “brew install mas”. Run it in Terminal, then check again."
     }
 }
 
@@ -163,22 +191,13 @@ struct UpdatesView: View {
                 Button { model.load(check: true) } label: { Label("Check now", systemImage: "arrow.clockwise") }.disabled(model.loading)
                 Button("Update all (\(installable.count))") { ui.confirmAll = true }.disabled(installable.isEmpty).keyboardShortcut(.defaultAction)
             }.padding(10)
-            if let v = model.selfUpdate {
-                HStack {
-                    Image(systemName: "sparkles")
-                    Text("Burrow \(v) is available")
-                    Spacer()
-                    Button("Update Burrow") { model.selfUpdateNow() }
-                }.padding(8).background(Color.accentColor.opacity(0.1))
-            }
             if !model.hasMas && model.updates.contains(where: { $0.source == "App Store" && !$0.installable }) {
                 HStack {
                     Image(systemName: "bag")
-                    Text(model.hasBrew ? "Update App Store apps here too: Burrow installs the free mas tool with Homebrew."
+                    Text(model.hasBrew ? "To update App Store apps here too, install the free mas tool: brew install mas"
                                        : "App Store apps update in the App Store. Install Homebrew (brew.sh) to update them here.")
                     Spacer()
-                    if model.installingMas { ProgressView().controlSize(.small) }
-                    if model.hasBrew { Button("Install mas") { model.installMas() }.disabled(model.installingMas) }
+                    if model.hasBrew { Button("Copy Command") { model.copyMasCommand() } }
                 }.padding(8).background(Color.secondary.opacity(0.08))
             }
             Divider()
@@ -301,7 +320,7 @@ struct UpdatesView: View {
         HStack {
             Image(systemName: "clock")
             Text("Automatic checks: " + (["off": "off", "notify": "notify me daily", "install": "install daily"][model.mode] ?? model.mode))
-            Text("· change in Alfred's workflow settings").foregroundStyle(.secondary)
+            Text("· change it in Burrow's Workflow Configuration in Alfred").foregroundStyle(.secondary)
             Spacer()
             if !model.history.isEmpty {
                 Menu("Roll back") {
@@ -436,7 +455,7 @@ struct BrowsersView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "lock.shield").font(.largeTitle)
                     Text("Safari's data is protected by macOS").font(.headline)
-                    Text("Give Alfred Full Disk Access to clean Safari (and BurrowWindow too if you opened this window from the menu bar).")
+                    Text("To clean Safari, give Burrow Companion Full Disk Access (and Alfred too, to clean it from Alfred).")
                         .foregroundStyle(.secondary).multilineTextAlignment(.center)
                     Button("Open Privacy settings") {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
@@ -591,40 +610,250 @@ struct RootView: View {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    var window: NSWindow!
+// MARK: - Menu bar
 
-    func applicationDidFinishLaunching(_ n: Notification) {
-        // One window at a time: bring an already-running copy forward instead.
-        let me = ProcessInfo.processInfo.processIdentifier
-        if let other = NSWorkspace.shared.runningApplications.first(where: {
-            $0.executableURL == Bundle.main.executableURL && $0.processIdentifier != me
-        }) {
-            DistributedNotificationCenter.default().postNotificationName(
-                Notification.Name("io.github.burrow-alfred.show"), object: startSection, userInfo: nil, deliverImmediately: true)
-            other.activate(options: [.activateIgnoringOtherApps])
-            NSApp.terminate(nil)
+final class MenuBar: NSObject {
+    var statusItem: NSStatusItem!
+    var timer: Timer?
+    var refreshing = false
+    let openWindow: (String) -> Void
+
+    init(openWindow: @escaping (String) -> Void) {
+        self.openWindow = openWindow
+        super.init()
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.title = "Burrow"
+        statusItem.menu = buildMenu(rows: ["Reading system status…"])
+        refresh()
+        schedule()
+    }
+
+    var interval: TimeInterval {
+        let v = UserDefaults.standard.double(forKey: "refreshInterval")
+        return v >= 5 ? v : 30
+    }
+
+    func schedule() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.refresh() }
+    }
+
+    @objc func refresh() {
+        let wf = workflowDir
+        if wf.isEmpty {
+            statusItem.button?.image = nil
+            statusItem.button?.title = "Burrow ⚠︎"
+            statusItem.menu = buildMenu(rows: ["Burrow isn't installed in Alfred"])
             return
         }
-        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("io.github.burrow-alfred.show"), object: nil, queue: .main) { n in
-            if let section = n.object as? String { RootUI.shared?.section = section }
-            self.window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+        if refreshing { return }
+        refreshing = true
+        DispatchQueue.global(qos: .utility).async {
+            let data = MenuBar.runEngine(wf + "/engine.py")
+            DispatchQueue.main.async {
+                self.refreshing = false
+                self.update(data)
+            }
         }
-        if let icon = NSImage(contentsOfFile: workflowDir + "/icon.png") { NSApp.applicationIconImage = icon }
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 620),
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                          backing: .buffered, defer: false)
-        window.title = "Burrow"
-        window.contentView = NSHostingView(rootView: RootView())
-        window.center()
-        window.setFrameAutosaveName("BurrowWindow")
-        window.makeKeyAndOrderFront(nil)
+    }
+
+    static func runEngine(_ engine: String) -> [String: Any]? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [engine, "status"]
+        process.environment = workflowEnvironment()
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (try? JSONSerialization.jsonObject(with: output)) as? [String: Any]
+    }
+
+    static func bytes(_ value: Any?) -> String {
+        let n = (value as? Double) ?? Double(value as? Int ?? 0)
+        let f = ByteCountFormatter(); f.countStyle = .memory
+        return f.string(fromByteCount: Int64(n))
+    }
+
+    func update(_ status: [String: Any]?) {
+        guard let s = status, let score = s["health_score"] as? Int else {
+            statusItem.button?.image = nil
+            statusItem.button?.title = "Burrow ⚠︎"
+            statusItem.menu = buildMenu(rows: ["Couldn't read system status"])
+            return
+        }
+        let color: NSColor = score >= 90 ? .systemGreen : score >= 70 ? .systemYellow : score >= 50 ? .systemOrange : .systemRed
+        if let heart = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: "Health") {
+            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular).applying(.init(paletteColors: [color]))
+            statusItem.button?.image = heart.withSymbolConfiguration(config)
+            statusItem.button?.imagePosition = .imageLeading
+        }
+        var lowDisk = false
+        var rootDisk: [String: Any]?
+        if let disks = s["disks"] as? [[String: Any]] { rootDisk = disks.first(where: { ($0["mount"] as? String) == "/" }) }
+        if let root = rootDisk {
+            let total = root["total"] as? Double ?? 0
+            let free = root["available"] as? Double ?? (total - (root["used"] as? Double ?? 0))
+            lowDisk = total > 0 && (free < 10 * 1_073_741_824 || free / total < 0.1)
+        }
+        statusItem.button?.title = " \(score)" + (lowDisk ? " ⚠︎" : "")
+        statusItem.button?.toolTip = "Burrow: health \(score) of 100"
+        statusItem.button?.setAccessibilityLabel("Burrow, health \(score) of 100" + (lowDisk ? ", startup disk almost full" : ""))
+
+        var rows = ["Health \(score)/100 — \(s["health_score_msg"] as? String ?? "")"]
+        if lowDisk { rows.append("⚠︎ Startup disk almost full — try Clean System") }
+        let cpu = s["cpu"] as? [String: Any] ?? [:]
+        let thermal = s["thermal"] as? [String: Any] ?? [:]
+        var cpuRow = String(format: "CPU %.0f%%", cpu["usage"] as? Double ?? 0)
+        if let t = thermal["cpu_temp"] as? Double, t > 0 { cpuRow += String(format: " · %.0f°C", t) }
+        rows.append(cpuRow)
+        if let mem = s["memory"] as? [String: Any] {
+            rows.append(String(format: "Memory %.0f%% · %@ of %@ · pressure %@", mem["used_percent"] as? Double ?? 0,
+                               MenuBar.bytes(mem["used"]), MenuBar.bytes(mem["total"]), mem["pressure"] as? String ?? "normal"))
+        }
+        if let root = rootDisk {
+            let free = root["available"] as? Double ?? ((root["total"] as? Double ?? 0) - (root["used"] as? Double ?? 0))
+            rows.append("Disk \(MenuBar.bytes(free)) available of \(MenuBar.bytes(root["total"]))")
+        }
+        if let battery = (s["batteries"] as? [[String: Any]])?.first {
+            rows.append("Battery \(battery["percent"] as? Int ?? 0)% · \(battery["status"] as? String ?? "")")
+        }
+        if let fans = thermal["fans"] as? [Int], !fans.isEmpty {
+            rows.append("Fans " + fans.map { "\($0) rpm" }.joined(separator: " / "))
+        }
+        if let n = s["app_updates"] as? Int, n > 0 {
+            rows.append("⬆︎ \(n) app update\(n == 1 ? "" : "s") available")
+        }
+        statusItem.menu = buildMenu(rows: rows)
+    }
+
+    func buildMenu(rows: [String]) -> NSMenu {
+        let menu = NSMenu()
+        for (i, row) in rows.enumerated() {
+            let item = NSMenuItem(title: row, action: nil, keyEquivalent: "")
+            if i == 0 { item.attributedTitle = NSAttributedString(string: row, attributes: [.font: NSFont.boldSystemFont(ofSize: 13)]) }
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        if workflowDir.isEmpty {
+            let get = NSMenuItem(title: "Get the Burrow Workflow…", action: #selector(openReleases), keyEquivalent: "")
+            get.target = self
+            menu.addItem(get)
+        } else {
+            for (title, target, key) in [
+                ("App Updates…", "window:updates", "u"), ("Browsers…", "window:browsers", "b"),
+                ("System Status in Alfred", "status", "s"), ("Clean System in Alfred", "clean", "c"),
+                ("Analyze Disk in Alfred", "analyze", "a"), ("Optimize System in Alfred", "optimize", "o"),
+            ] {
+                let item = NSMenuItem(title: title, action: #selector(go(_:)), keyEquivalent: key)
+                item.representedObject = target
+                item.target = self
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(.separator())
+        let refreshItem = NSMenuItem(title: "Refresh Now", action: #selector(refresh), keyEquivalent: "r")
+        refreshItem.target = self
+        menu.addItem(refreshItem)
+        let every = NSMenuItem(title: "Refresh Every", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for (label, secs) in [("10 Seconds", 10.0), ("30 Seconds", 30.0), ("1 Minute", 60.0), ("5 Minutes", 300.0)] {
+            let it = NSMenuItem(title: label, action: #selector(setInterval(_:)), keyEquivalent: "")
+            it.representedObject = secs
+            it.target = self
+            it.state = abs(interval - secs) < 0.5 ? .on : .off
+            sub.addItem(it)
+        }
+        every.submenu = sub
+        menu.addItem(every)
+        let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLogin), keyEquivalent: "")
+        login.target = self
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(login)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit Burrow Companion", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        return menu
+    }
+
+    @objc func setInterval(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(sender.representedObject as? Double ?? 30, forKey: "refreshInterval")
+        schedule()
+        refresh()
+    }
+
+    @objc func toggleLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
+            else { try SMAppService.mainApp.register() }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't change Start at Login"
+            alert.informativeText = error.localizedDescription + "\n\nYou can also add Burrow Companion in System Settings → General → Login Items."
+            alert.runModal()
+        }
+        refresh()
+    }
+
+    @objc func openReleases() { NSWorkspace.shared.open(releasesURL) }
+
+    @objc func go(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? String else { return }
+        if target.hasPrefix("window:") { openWindow(String(target.dropFirst("window:".count))); return }
+        var c = URLComponents()
+        c.scheme = "alfred"; c.host = "runtrigger"; c.path = "/\(workflowBundleID)/open/"
+        c.queryItems = [URLQueryItem(name: "argument", value: target)]
+        if let url = c.url { NSWorkspace.shared.open(url) }
+    }
+}
+
+// MARK: - App
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    var window: NSWindow?
+    var menuBar: MenuBar!
+
+    func applicationWillFinishLaunching(_ n: Notification) {
+        NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURL(_:reply:)),
+                                                     forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
+    }
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        buildMainMenu()
+        menuBar = MenuBar(openWindow: { [weak self] section in self?.showWindow(section) })
+        if CommandLine.arguments.count > 1, ["updates", "browsers"].contains(CommandLine.arguments[1]) {
+            showWindow(CommandLine.arguments[1])
+        }
+    }
+
+    @objc func handleURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue, let url = URL(string: s) else { return }
+        let section = url.host ?? "updates"
+        if section == "menubar" { return }  // just launching shows the menu bar icon
+        showWindow(section)
+    }
+
+    func showWindow(_ section: String) {
+        startSection = section
+        RootUI.shared?.section = section
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 620),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            w.title = "Burrow"
+            w.isReleasedWhenClosed = false
+            w.delegate = self
+            w.contentView = NSHostingView(rootView: RootView())
+            w.center()
+            w.setFrameAutosaveName("BurrowWindow")
+            window = w
+        }
+        NSApp.setActivationPolicy(.regular)  // a Dock icon and menus while the window is open
+        window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        // Development aid: BURROW_SNAPSHOT=/path.png saves a picture of the window and quits.
-        if let out = ProcessInfo.processInfo.environment["BURROW_SNAPSHOT"] {
+        if let out = ProcessInfo.processInfo.environment["BURROW_SNAPSHOT"] {  // development aid
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-                guard let view = self.window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
+                guard let view = self.window?.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
                 view.cacheDisplay(in: view.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
                 exit(0)
@@ -632,14 +861,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+    func windowWillClose(_ n: Notification) {
+        NSApp.setActivationPolicy(.accessory)  // back to a menu bar-only app
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        showWindow(startSection)
+        return true
+    }
 }
 
 func buildMainMenu() {
     let main = NSMenu()
     let appItem = NSMenuItem(); main.addItem(appItem)
     let appMenu = NSMenu()
-    appMenu.addItem(withTitle: "Quit Burrow", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appMenu.addItem(withTitle: "Quit Burrow Companion", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     appItem.submenu = appMenu
     let fileItem = NSMenuItem(); main.addItem(fileItem)
     let fileMenu = NSMenu(title: "File")
@@ -647,8 +885,6 @@ func buildMainMenu() {
     fileItem.submenu = fileMenu
     let editItem = NSMenuItem(); main.addItem(editItem)
     let edit = NSMenu(title: "Edit")
-    edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-    edit.addItem(.separator())
     edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
     edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
     edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
@@ -658,8 +894,7 @@ func buildMainMenu() {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.regular)
-buildMainMenu()
+app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

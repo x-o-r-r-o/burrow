@@ -27,7 +27,7 @@ CMD, ALT, CTRL = 1048576, 524288, 262144
 
 # (command, keyword, title, subtext, icon, running subtext)
 SCRIPT_FILTERS = [
-    ("hub", "bu", "Burrow", "All Burrow commands", "status", "Loading…"),
+    ("hub", "burrow", "Burrow", "All Burrow commands", "status", "Loading…"),
     ("status", "bustatus", "System Status", "Health, CPU, memory, disk, battery and network", "status", "Reading system status…"),
     ("browsers", "bubrowsers", "Browsers", "Clear history, cache, cookies and more, or reset a browser", "browser", "Finding browsers…"),
     ("updates", "buupdates", "App Updates", "Check your apps for new versions and install them safely", "update", "Checking…"),
@@ -41,7 +41,7 @@ SCRIPT_FILTERS = [
     ("large", "bularge", "Large Files", "Find the biggest files in your home folder", "large", "Searching…"),
     ("dupes", "budupes", "Duplicate Files", "Find identical copies of files", "dupes", "Searching…"),
     ("startup", "bustartup", "Startup Items", "Launch agents and daemons", "startup", "Loading…"),
-    ("menubar", "bumenu", "Menu Bar Health", "Show the health score in the menu bar", "menubar", "Checking…"),
+    ("menubar", "bumenu", "Burrow Companion", "Optional app: health in the menu bar, Updates and Browsers windows", "menubar", "Checking…"),
 ]
 
 
@@ -59,6 +59,20 @@ def uid(name):
 
 def conn(dest, modifiers=0, subtext=""):
     return {"destinationuid": dest, "modifiers": modifiers, "modifiersubtext": subtext, "vitoclose": False}
+
+
+def keyword_fields():
+    """One editable keyword per command (Workflow's Configuration)."""
+    fields = []
+    for command, keyword, title, subtext, icon, running in SCRIPT_FILTERS:
+        fields.append({
+            "type": "textfield",
+            "variable": "keyword_" + command,
+            "label": "{} keyword".format(title if command != "hub" else "Main"),
+            "description": subtext + "." if command != "hub" else "Lists every Burrow command.",
+            "config": {"default": keyword, "placeholder": keyword, "required": True, "trim": True},
+        })
+    return fields
 
 
 def build_plist(icon_for):
@@ -114,7 +128,7 @@ def build_plist(icon_for):
                     "argumenttrimmode": 0,
                     "argumenttype": 1,
                     "escaping": 102,
-                    "keyword": keyword,
+                    "keyword": "{var:keyword_%s}" % command,
                     "queuedelaycustom": 3,
                     "queuedelayimmediatelyinitially": True,
                     "queuedelaymode": 0,
@@ -193,20 +207,21 @@ def build_plist(icon_for):
     connections[open_vars] = [conn(run_uid)]
 
     with open(os.path.join(ROOT, "README.md")) as f:
-        readme = f.read()
+        # Alfred shows the workflow's name and icon itself; start at the description
+        readme = f.read().split("\n", 1)[1].strip() + "\n"
 
     return {
         "bundleid": BUNDLE_ID,
         "category": "Tools",
         "connections": connections,
-        "createdby": "Burrow",
+        "createdby": "x-o-r-r-o",
         "description": "Dig out the clutter: deep clean and optimize your Mac",
         "disabled": False,
         "name": "Burrow",
         "objects": objects,
         "readme": readme,
         "uidata": uidata,
-        "userconfigurationconfig": [
+        "userconfigurationconfig": keyword_fields() + [
             {
                 "type": "popupbutton",
                 "variable": "status_refresh",
@@ -226,14 +241,7 @@ def build_plist(icon_for):
                 "variable": "auto_updates",
                 "label": "Automatic Update Checks",
                 "description": "Once a day, check your apps for updates. “Install” also installs updates for apps that aren't open, after verifying each download.",
-                "config": {"default": "notify", "pairs": [["Off", "off"], ["Notify me", "notify"], ["Install automatically", "install"]]},
-            },
-            {
-                "type": "popupbutton",
-                "variable": "menubar_interval",
-                "label": "Menu Bar Refresh",
-                "description": "How often the menu bar health score updates.",
-                "config": {"default": "30", "pairs": [["10 Seconds", "10"], ["30 Seconds", "30"], ["1 Minute", "60"], ["5 Minutes", "300"]]},
+                "config": {"default": "off", "pairs": [["Off", "off"], ["Notify me", "notify"], ["Install automatically", "install"]]},
             },
             {
                 "type": "popupbutton",
@@ -263,12 +271,12 @@ def build_plist(icon_for):
     }
 
 
-def build_swift(src, out):
-    """Compile a Swift helper as a universal (Apple silicon + Intel) binary."""
+def build_swift(src, out, work=None):
+    """Compile a Swift program as a universal (Apple silicon + Intel) binary."""
     if not shutil.which("swiftc"):
         sys.exit("build.py: the Swift compiler (swiftc) isn't installed. Install Apple's Command Line Tools: xcode-select --install")
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    tmp = os.path.join(BUILD, ".swift")
+    tmp = os.path.join(work or BUILD, ".swift")
     os.makedirs(tmp, exist_ok=True)
     slices = []
     for arch in ("arm64", "x86_64"):
@@ -283,9 +291,63 @@ def build_swift(src, out):
     shutil.rmtree(tmp)
 
 
-def main():
-    if not shutil.which("swiftc"):  # check before touching the previous build
+def build_companion():
+    """Burrow Companion.app (optional, separate download): menu bar icon + window.
+    Written to dist/Burrow-Companion.zip."""
+    if not shutil.which("swiftc"):
         sys.exit("build.py: the Swift compiler (swiftc) isn't installed. Install Apple's Command Line Tools: xcode-select --install")
+    work = os.path.join(ROOT, "build-companion")
+    shutil.rmtree(work, ignore_errors=True)
+    app = os.path.join(work, "Burrow Companion.app")
+    contents = os.path.join(app, "Contents")
+    os.makedirs(os.path.join(contents, "MacOS"))
+    os.makedirs(os.path.join(contents, "Resources"))
+    build_swift(os.path.join(ROOT, "tools", "companion", "BurrowCompanion.swift"), os.path.join(contents, "MacOS", "Burrow Companion"), work)
+    with open(os.path.join(contents, "Info.plist"), "wb") as f:
+        plistlib.dump({
+            "CFBundleIdentifier": BUNDLE_ID + ".companion",
+            "CFBundleName": "Burrow Companion",
+            "CFBundleDisplayName": "Burrow Companion",
+            "CFBundleExecutable": "Burrow Companion",
+            "CFBundleIconFile": "AppIcon",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
+            "LSMinimumSystemVersion": "13.0",
+            "LSUIElement": True,
+            "NSHumanReadableCopyright": "MIT License. github.com/" + REPO,
+            "CFBundleURLTypes": [{"CFBundleURLName": BUNDLE_ID + ".companion", "CFBundleURLSchemes": ["burrow-companion"]}],
+        }, f)
+    iconset = os.path.join(work, "AppIcon.iconset")
+    os.makedirs(iconset)
+    for size in (16, 32, 128, 256, 512):
+        for scale in (1, 2):
+            px = size * scale
+            name = "icon_{}x{}{}.png".format(size, size, "@2x" if scale == 2 else "")
+            subprocess.run(["sips", "-z", str(px), str(px), os.path.join(SRC, "icon.png"), "--out", os.path.join(iconset, name)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["iconutil", "-c", "icns", iconset, "-o", os.path.join(contents, "Resources", "AppIcon.icns")], check=True)
+    shutil.rmtree(iconset)
+    subprocess.run(["codesign", "-s", "-", "--force", "--deep", app], check=True, stderr=subprocess.PIPE)
+    out = os.path.join(DIST, "Burrow-Companion.zip")
+    if os.path.exists(out):
+        os.remove(out)
+    subprocess.run(["ditto", "-c", "-k", "--keepParent", app, out], check=True)
+    print("built", out)
+    return app
+
+
+def main():
+    if "--companion" in sys.argv:
+        os.makedirs(DIST, exist_ok=True)
+        app = build_companion()
+        if "--install" in sys.argv:
+            dest = "/Applications/Burrow Companion.app"
+            shutil.rmtree(dest, ignore_errors=True)
+            shutil.copytree(app, dest, symlinks=True)
+            subprocess.run(["/usr/bin/open", dest])
+            print("installed", dest)
+        return
     shutil.rmtree(BUILD, ignore_errors=True)
     os.makedirs(BUILD)
     os.makedirs(DIST, exist_ok=True)
@@ -293,11 +355,6 @@ def main():
     for name in ("burrow.py", "engine.py", "updates.py", "browsers.py", "run.sh"):
         shutil.copy(os.path.join(SRC, name), BUILD)
     os.chmod(os.path.join(BUILD, "run.sh"), 0o755)
-    build_swift(os.path.join(ROOT, "tools", "menubar", "BurrowMenu.swift"), os.path.join(BUILD, "bin", "BurrowMenu"))
-    build_swift(os.path.join(ROOT, "tools", "trash", "BurrowTrash.swift"), os.path.join(BUILD, "bin", "BurrowTrash"))
-    build_swift(os.path.join(ROOT, "tools", "window", "BurrowWindow.swift"), os.path.join(BUILD, "bin", "BurrowWindow"))
-    with open(os.path.join(BUILD, "bin", ".stamp"), "w") as f:
-        f.write("{}-{}\n".format(VERSION, uuid.uuid4().hex[:12]))
     shutil.copytree(os.path.join(SRC, "icons"), os.path.join(BUILD, "icons"), ignore=shutil.ignore_patterns(".*", "__pycache__"))
     shutil.copy(os.path.join(SRC, "icon.png"), os.path.join(BUILD, "icon.png"))
 

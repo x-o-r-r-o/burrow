@@ -29,7 +29,7 @@ BUNDLE_ID = engine.BUNDLE_ID
 CACHE_DIR = engine.CACHE_DIR
 
 DEFAULT_KEYWORDS = {
-    "hub": "bu",
+    "hub": "burrow",
     "status": "bustatus",
     "clean": "buclean",
     "optimize": "buoptimize",
@@ -55,11 +55,16 @@ def load_keywords():
         import plistlib
         with open(os.path.join(WF_DIR, "info.plist"), "rb") as f:
             info = plistlib.load(f)
+        defaults = {c.get("variable"): (c.get("config") or {}).get("default") for c in info.get("userconfigurationconfig", [])}
         for obj in info.get("objects", []):
             cfg = obj.get("config", {})
             m = re.search(r"run\.sh (\w+) ", cfg.get("script", ""))
-            if obj.get("type", "").endswith("scriptfilter") and m and cfg.get("keyword"):
-                words[m.group(1)] = cfg["keyword"]
+            word = cfg.get("keyword") or ""
+            var = re.fullmatch(r"\{var:(\w+)\}", word)
+            if var:  # set in the Workflow's Configuration; Alfred passes it to scripts
+                word = os.environ.get(var.group(1)) or defaults.get(var.group(1)) or ""
+            if obj.get("type", "").endswith("scriptfilter") and m and word.strip():
+                words[m.group(1)] = word.strip()
     except Exception:  # noqa: BLE001 — fall back to the defaults
         pass
     return words
@@ -383,7 +388,7 @@ HUB = [
     ("purge", "Purge Dev Artifacts", "Remove old node_modules, .next, dist, target, venv…", "purge"),
     ("installer", "Clean Installers", "Remove .dmg, .pkg and .iso files", "installer"),
     ("touchid", "Touch ID for Sudo", "Use your fingerprint instead of a password for sudo", "touchid-green"),
-    ("menubar", "Menu Bar Health", "Show the health score in the menu bar", "menubar"),
+    ("menubar", "Burrow Companion", "Optional app: health score in the menu bar, Updates and Browsers windows", "menubar"),
 ]
 
 
@@ -418,9 +423,6 @@ def cmd_hub(query):
         if matches(query, title, sub, KEYWORDS[key]):
             items.append(item(title, "{} · {}".format(sub, KEYWORDS[key]), icon(icn), act("alfred_search", KEYWORDS[key] + " "),
                               autocomplete=None, uid="hub-" + key))
-    mine = self_update_item()
-    if mine and matches(query, mine["title"], "update burrow"):
-        items.insert(0, mine)
     undo = undo_item()
     if undo and matches(query, undo["title"], "undo put back"):
         undo.pop("uid", None)  # keep it on top: Alfred doesn't reorder rows without a uid
@@ -432,23 +434,6 @@ def cmd_hub(query):
     if trash and matches(query, "Empty Trash", "free space"):
         items.append(trash)
     emit(items or [item("No matching Burrow command", "Clear the search to see every command", icon("search"), valid=False, autocomplete="")], learn=True)
-
-
-def self_update_item():
-    try:
-        import updates
-        up = updates.check_self(network=False)  # never wait for the network while typing
-    except Exception:  # noqa: BLE001
-        return None
-    if not up:
-        return None
-    return item(
-        "Burrow {} Is Available".format(up["version"]),
-        "You have {} · ↩ Update (Alfred will ask to confirm) · ⌘↩ What's new".format(up["installed"]),
-        icon("update"), act("self_update", "", update=up),
-        mods={"cmd": mod("What's new", act("open", up.get("notes") or ""))},
-        text={"largetype": up.get("body") or ""},
-    )
 
 
 def undo_item():
@@ -822,7 +807,7 @@ def cmd_purge(query):
             valid=not running,
         ))
     if not running:
-        items.append(item("Rescan", "Search project folders again · set folders in Configure Workflow", icon("refresh"), rescan_vars))
+        items.append(item("Rescan", "Search project folders again · set folders in the Workflow’s Configuration", icon("refresh"), rescan_vars))
     emit(items, rerun=0.5 if running else None)
 
 
@@ -1492,9 +1477,6 @@ def cmd_updates(query):
     installable = [u for u in ups if u.get("installable")]
     checked_ago = time_since(result["time"]) if result.get("time") else "never"
 
-    mine = self_update_item()
-    if mine:
-        items.append(mine)
     if running:
         items.append(item("Checking for Updates… {}s".format(elapsed(job)), "Showing the last results meanwhile", icon("search"), valid=False))
     win = window_item("updates", "Open the Updates Window", "Release notes, update all, roll back, with progress for each app")
@@ -1522,15 +1504,12 @@ def cmd_updates(query):
 
     store_waiting = [u for u in ups if u["source"] == "App Store" and not u.get("installable") and not u.get("ios")]
     if store_waiting and not query:
-        if updates.brew_path():
-            items.append(item(
-                "Update App Store Apps From Burrow Too",
-                "Installs the free mas tool with Homebrew · then {} can update here · ↩ Install".format(plural(len(store_waiting), "app")),
-                icon("download"), act("install_mas"),
-            ))
-        else:
-            items.append(item("App Store Apps Update in the App Store", "Install Homebrew (brew.sh) to let Burrow update them too",
-                              icon("info"), act("open", "https://brew.sh")))
+        items.append(item(
+            "Update App Store Apps From Burrow Too",
+            "Install the free mas tool: brew install mas · ↩ Copy the command",
+            icon("info"), act("copy", updates.MAS_INSTALL_COMMAND),
+            mods={"cmd": mod("About mas (github.com/mas-cli/mas)", act("open", "https://github.com/mas-cli/mas"))},
+        ))
     for u in ups:
         if not matches(query, u["name"], u["source"]):
             continue
@@ -1572,32 +1551,20 @@ def cmd_updates(query):
                 icon("hidden"), act("update_unignore"),
                 text={"largetype": "\n".join("{}: {}".format(k, "always" if v == "*" else "version " + v) for k, v in sorted(ignored.items()))},
             ))
-        mode = os.environ.get("auto_updates", "notify")
+        mode = os.environ.get("auto_updates", "off")
         items.append(item(
             "Automatic Checks: {}".format({"off": "Off", "notify": "Notify Daily", "install": "Install Daily"}.get(mode, mode)),
-            "Change it in Configure Workflow · {} apps have no update source".format(result.get("unknown", 0)),
+            "Change it in the Workflow’s Configuration · {} apps have no update source".format(result.get("unknown", 0)),
             icon("info"), valid=False,
         ))
     emit(items, rerun=0.5 if running else None)
 
 
-WINDOW_BIN = os.path.join(WF_DIR, "bin", "BurrowWindow")
-
-
-def open_window(section):
-    """Open (or bring forward) Burrow's window on a section."""
-    try:
-        os.chmod(WINDOW_BIN, 0o755)
-    except OSError:
-        pass
-    subprocess.Popen([WINDOW_BIN, WF_DIR, section], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True, env=dict(os.environ, alfred_workflow_cache=CACHE_DIR))
-
-
 def window_item(section, title, subtitle):
-    if not os.path.exists(WINDOW_BIN):
+    """A row that opens Burrow Companion's window, when the optional app is installed."""
+    if not companion_path():
         return None
-    return item(title, subtitle, icon("menubar"), act("window", section))
+    return item(title, subtitle, icon("menubar"), act("companion", section))
 
 
 def install_updates(paths):
@@ -1915,99 +1882,57 @@ def cmd_touchid(query):
 
 
 # ---------------------------------------------------------------------------
-# bumenu — Menu Bar Health
+# bumenu — Burrow Companion (optional menu bar app and windows)
 # ---------------------------------------------------------------------------
 
-MENUBAR_BIN = os.path.join(WF_DIR, "bin", "BurrowMenu")
-LAUNCH_AGENT_LABEL = "io.github.burrow-alfred.menubar"
-LAUNCH_AGENT = os.path.join(HOME, "Library", "LaunchAgents", LAUNCH_AGENT_LABEL + ".plist")
+COMPANION_NAME = "Burrow Companion.app"
+COMPANION_URL = "https://github.com/x-o-r-r-o/burrow/releases/latest"
+# Left behind by Burrow 1.1 and earlier, which ran its helpers from inside the workflow
+LEGACY_AGENT = os.path.join(HOME, "Library", "LaunchAgents", "io.github.burrow-alfred.menubar.plist")
 
 
-def menubar_interval():
+def companion_path():
+    for folder in ("/Applications", os.path.join(HOME, "Applications")):
+        path = os.path.join(folder, COMPANION_NAME)
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def open_companion(section):
+    path = companion_path()
+    if path:
+        subprocess.run(["/usr/bin/open", "-a", path, "burrow-companion://" + section])
+
+
+def retire_legacy_helpers():
+    """Stop and remove the menu bar helper older versions started from the workflow folder."""
     try:
-        return str(max(5, int(os.environ.get("menubar_interval", "30") or 30)))
-    except ValueError:
-        return "30"
-
-
-def menubar_pids():
-    pids = []
-    for line in engine.sh(["/bin/ps", "-Axo", "pid=,comm="]).splitlines():
-        parts = line.strip().split(None, 1)
-        # Any copy of the helper (the workflow folder may have moved, e.g. a new sync folder)
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].endswith("/bin/BurrowMenu"):
-            pids.append(int(parts[0]))
-    return pids
-
-
-def menubar_running():
-    return bool(menubar_pids())
-
-
-def menubar_start():
-    if os.path.exists(LAUNCH_AGENT):
-        menubar_set_login(True)  # keep the login item's refresh interval current
-    if menubar_running():
-        return
-    try:
-        os.chmod(MENUBAR_BIN, 0o755)  # zip extraction can drop the executable bit
+        os.remove(LEGACY_AGENT)
     except OSError:
         pass
-    # Downloaded workflows can carry a quarantine flag that would block the helper.
-    subprocess.run(["/usr/bin/xattr", "-dr", "com.apple.quarantine", os.path.dirname(MENUBAR_BIN)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.Popen(
-        [MENUBAR_BIN, ENGINE, menubar_interval()],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-    )
-
-
-def menubar_stop():
-    for pid in menubar_pids():
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-
-
-def menubar_set_login(enabled):
-    if enabled:
-        import plistlib
-        os.makedirs(os.path.dirname(LAUNCH_AGENT), exist_ok=True)
-        with open(LAUNCH_AGENT, "wb") as f:
-            plistlib.dump({
-                "Label": LAUNCH_AGENT_LABEL,
-                # If Burrow is removed, the login item removes itself instead of failing daily
-                "ProgramArguments": ["/bin/sh", "-c",
-                                     'if [ -x "$0" ]; then exec "$0" "$1" "$2"; else rm -f "$HOME/Library/LaunchAgents/{}.plist"; fi'.format(LAUNCH_AGENT_LABEL),
-                                     MENUBAR_BIN, ENGINE, menubar_interval()],
-                "RunAtLoad": True,
-                "ProcessType": "Interactive",
-            }, f)
-    else:
-        # Only stop it starting at login; the icon that's showing now stays
-        try:
-            os.remove(LAUNCH_AGENT)
-        except OSError:
-            pass
+    for line in engine.sh(["/bin/ps", "-Axo", "pid=,comm="]).splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].endswith(("/bin/BurrowMenu", "/bin/BurrowWindow")):
+            try:
+                os.kill(int(parts[0]), signal.SIGTERM)
+            except OSError:
+                pass
 
 
 def cmd_menubar(query):
-    if not os.path.exists(MENUBAR_BIN):
-        emit([item("Menu Bar Helper Missing", "Reinstall Burrow to restore bin/BurrowMenu", icon("error"), valid=False)])
+    if not companion_path():
+        emit([
+            item("Get Burrow Companion (Optional)",
+                 "↩ Download page · a separate app for the health score in the menu bar and the Updates and Browsers windows",
+                 icon("menubar"), act("open", COMPANION_URL), mods={"cmd": mod("⌘ Copy the download link", act("copy", COMPANION_URL))}),
+            item("Everything Else Works Without It", "Status, updates and browser cleaning are all available in Alfred", icon("check"), valid=False),
+        ])
         return
-    running = menubar_running()
-    at_login = os.path.exists(LAUNCH_AGENT)
     emit([
-        item(
-            "Menu Bar Health  —  {}".format("On" if running else "Off"),
-            "↩ {} the health score in the menu bar · refreshes every {}s".format("Hide" if running else "Show", menubar_interval()),
-            icon("menubar"), act("menubar", "stop" if running else "start"),
-        ),
-        item(
-            "Start at Login  —  {}".format("On" if at_login else "Off"),
-            "↩ Turn {} · shows the health score automatically when you log in".format("off" if at_login else "on"),
-            icon("check" if at_login else "refresh"), act("menubar", "login-off" if at_login else "login-on"),
-        ),
+        item("Open Burrow Companion", "↩ Menu bar health score, refresh interval and Start at Login", icon("menubar"), act("companion", "menubar")),
+        item("Open the Updates Window", "Release notes, update all, roll back, with progress for each app", icon("menubar"), act("companion", "updates")),
+        item("Open the Browsers Window", "Choose what to clean with switches, for every browser", icon("menubar"), act("companion", "browsers")),
     ])
 
 
@@ -2055,10 +1980,6 @@ def confirm(title, message, button):
     return res.stdout.decode().strip() == "true"
 
 
-def open_terminal(command):
-    osascript(["on run argv", 'tell application "Terminal" to do script (item 1 of argv)', 'tell application "Terminal" to activate', "end run"], command)
-
-
 def trashed_message(done, failed):
     if failed:
         return "{} · couldn't move {}: {}".format(done, plural(len(failed), "item"), ", ".join(os.path.basename(f) for f in failed[:5]))
@@ -2090,7 +2011,7 @@ def dispatch(action, target, p):
         command, _, query = target.partition(" ")
         if command in KEYWORDS:
             alfred_search(KEYWORDS[command] + " " + (os.environ.get("go_query") or query))
-    elif action in ("setup", "setup_silent"):
+    elif action == "setup":
         return "Burrow is ready"
     elif action == "open":
         subprocess.run(["/usr/bin/open", target])
@@ -2101,8 +2022,6 @@ def dispatch(action, target, p):
     elif action == "copy":
         subprocess.run(["/usr/bin/pbcopy"], input=target.encode())
         return "Copied: " + target
-    elif action == "terminal":
-        open_terminal(target)
     elif action == "rescan":
         job_for(p.get("kind", ""), p.get("key", "")).clear()
         alfred_search(target)
@@ -2166,15 +2085,8 @@ def dispatch(action, target, p):
         engine.save_state(engine.CLEAN_IGNORE, {"paths": []})
         job_for("clean").clear()
         alfred_search(KEYWORDS["clean"] + " ")
-    elif action == "self_update":
-        import updates
-        try:
-            updates.install_self(p.get("update") or {})
-        except Exception as e:  # noqa: BLE001
-            return "Couldn't update Burrow: {}".format(e)
-        return "Downloaded and verified. Click Update in Alfred's window to finish"
-    elif action == "window":
-        open_window(target or "updates")
+    elif action in ("companion", "window"):
+        open_companion(target or "updates")
     elif action == "browser_toggle":
         cur = browser_choice(target)["categories"]
         cat = p.get("category")
@@ -2189,17 +2101,6 @@ def dispatch(action, target, p):
         return browser_reset_action(target, bool(p.get("full")))
     elif action == "browser_cache_all":
         return browser_cache_all()
-    elif action == "install_mas":
-        import updates
-        if not confirm("Install mas?", "mas is a free, open-source command-line tool for the App Store (github.com/mas-cli/mas). Burrow installs it with Homebrew, then App Store updates can be installed from Burrow with your password.", "Install"):
-            return None
-        notify("Installing mas with Homebrew…")
-        try:
-            msg = updates.install_mas()
-        except Exception as e:  # noqa: BLE001
-            return "Couldn't install mas: {}".format(e)
-        alfred_search(KEYWORDS["updates"] + " ")
-        return msg
     elif action == "update_install":
         return install_updates(p.get("paths") or [])
     elif action == "update_ignore":
@@ -2252,19 +2153,6 @@ def dispatch(action, target, p):
         failed = engine.remove_startup_items(entries, batch_id=engine.new_batch_id())
         alfred_search(KEYWORDS["startup"] + " ")
         return trashed_message("Removed {}".format(plural(len(entries) - len(failed), "startup item")), failed)
-    elif action == "menubar":
-        if target == "start":
-            menubar_start()
-        elif target == "stop":
-            menubar_stop()
-        elif target == "login-on":
-            menubar_set_login(True)
-            menubar_start()
-        elif target == "login-off":
-            menubar_set_login(False)
-        alfred_search(KEYWORDS["menubar"] + " ")
-        return {"start": "Health score added to the menu bar", "stop": "Menu bar health hidden",
-                "login-on": "Menu bar health will start at login", "login-off": "Menu bar health won't start at login"}.get(target)
     elif action == "uninstall":
         return uninstall(target, p.get("name") or os.path.basename(target)[:-4], p.get("size") or 0,
                          excluded=set(p.get("excluded") or []), reviewed=p.get("reviewed", False), reset=p.get("reset", False))
@@ -2510,10 +2398,14 @@ def main():
     command = sys.argv[1]
     try:
         engine.housekeeping()  # a single file check; the tidy-up itself runs once a day
+        marker = os.path.join(CACHE_DIR, ".legacy-helpers-retired")
+        if os.environ.get("alfred_version") and not os.path.exists(marker):
+            retire_legacy_helpers()
+            open(marker, "w").close()
         # Only when run by Alfred (it sets alfred_version), never from tests or a terminal
         if command in ("updates", "hub", "run") and os.environ.get("alfred_version"):
             import updates
-            updates.sync_agent(os.environ.get("auto_updates", "notify"), os.path.join(WF_DIR, "updates.py"))
+            updates.sync_agent(os.environ.get("auto_updates", "off"), os.path.join(WF_DIR, "updates.py"))
     except Exception:  # noqa: BLE001
         pass
     try:

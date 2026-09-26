@@ -67,14 +67,6 @@ class SourcesTest(unittest.TestCase):
         index["Helium.app"]["bids"] = ["net.imput.helium"]
         self.assertEqual(updates.check_catalog(app, index)["version"], "1.0.0")
 
-    def test_self_update_never_waits_for_network_offline(self):
-        real = updates.fetch_json
-        updates.fetch_json = lambda *a, **k: (_ for _ in ()).throw(AssertionError("network used"))
-        try:
-            self.assertIsNone(updates.check_self(network=False))
-        finally:
-            updates.fetch_json = real
-
     def test_pick_asset_prefers_native_arch(self):
         assets = [("App-1.0-x64.zip", "u-x64"), ("App-1.0-arm64.zip", "u-arm"), ("App-1.0-universal.dmg", "u-uni"), ("App-1.0.zip.blockmap", "b")]
         chosen = updates.pick_asset(assets)
@@ -159,10 +151,22 @@ class InstallSafetyTest(unittest.TestCase):
         self.assertEqual(new["version"], "2.0")
 
 
-@unittest.skipUnless(os.access(os.path.join(os.path.dirname(__file__), "..", "build", "bin", "BurrowTrash"), os.X_OK), "build first")
+class AutoTest(unittest.TestCase):
+    def test_daily_run_follows_the_current_setting(self):
+        calls = []
+        real = (updates.sync_agent, updates._alfred_setting, updates.check_all)
+        updates.sync_agent = lambda mode, path: calls.append(mode)
+        updates.check_all = lambda: (_ for _ in ()).throw(AssertionError("checked while off"))
+        try:
+            updates._alfred_setting = lambda name: None  # never set: the default is off
+            updates.auto("notify")
+            self.assertEqual(calls, ["off"])
+        finally:
+            updates.sync_agent, updates._alfred_setting, updates.check_all = real
+
+
 class RollbackTest(unittest.TestCase):
     def test_undo_puts_the_old_version_back(self):
-        engine.TRASH_HELPER = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "build", "bin", "BurrowTrash"))
         engine.CACHE_DIR = tempfile.mkdtemp()
         root = tempfile.mkdtemp(dir=os.path.expanduser("~/Library/Caches"))
         try:

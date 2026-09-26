@@ -244,10 +244,6 @@ def is_running(browser, executables=None):
     return False
 
 
-def bundle_id_of(app_path):
-    return engine.read_plist_key(engine.app_info_plist(app_path), "CFBundleIdentifier")
-
-
 # ---------------------------------------------------------------------------
 # What each category means for each engine
 # ---------------------------------------------------------------------------

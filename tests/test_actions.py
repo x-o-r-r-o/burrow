@@ -22,7 +22,6 @@ os.environ["alfred_workflow_cache"] = tempfile.mkdtemp(prefix="burrow-actions-")
 import burrow  # noqa: E402
 import engine  # noqa: E402
 
-HELPER = os.path.join(ROOT, "build", "bin", "BurrowTrash")
 HOME = os.path.expanduser("~")
 BID = "io.burrowtest.demo"
 NAME = "BurrowTestApp"
@@ -34,10 +33,8 @@ def stub_ui(answer=True):
     burrow.alfred_search = lambda *a, **k: None
 
 
-@unittest.skipUnless(os.access(HELPER, os.X_OK), "build the workflow first (python3 build.py)")
 class ActionTest(unittest.TestCase):
     def setUp(self):
-        engine.TRASH_HELPER = HELPER
         engine.CACHE_DIR = burrow.CACHE_DIR = tempfile.mkdtemp(prefix="burrow-actions-")
         stub_ui()
         self.created = []

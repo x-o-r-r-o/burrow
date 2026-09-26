@@ -11,10 +11,6 @@ os.environ.setdefault("alfred_workflow_cache", tempfile.mkdtemp())
 import burrow  # noqa: E402
 import engine  # noqa: E402
 
-# Use the compiled trash helper from the last build when testing from src/.
-_built_helper = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "BurrowTrash")
-if not os.access(engine.TRASH_HELPER, os.X_OK) and os.access(_built_helper, os.X_OK):
-    engine.TRASH_HELPER = os.path.abspath(_built_helper)
 
 
 class ArtifactKindTest(unittest.TestCase):
@@ -169,8 +165,6 @@ class UndoTest(unittest.TestCase):
             self.assertEqual(engine.trash_paths([path], label="unit test"), [])
             self.assertFalse(os.path.exists(path))
             batch = engine.last_trash_batch()
-            if batch is None:
-                self.skipTest("compiled trash helper not available (run build.py first)")
             restored, skipped = engine.undo_trash_batch(batch)
             self.assertEqual((len(restored), skipped), (1, []))
             with open(path) as f:

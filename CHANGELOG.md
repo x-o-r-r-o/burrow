@@ -1,8 +1,15 @@
 # Changelog
 
-## 1.1.1
+## 1.2.0
 
-- **App Store updates** install from Burrow with mas (one password prompt). Burrow can install mas for you with Homebrew.
+Ready for the Alfred Gallery.
+
+- **Keywords:** the main keyword is now `burrow`, and every keyword can be changed in the Workflow’s Configuration.
+- **Nothing is installed for you any more.** When Apple's Command Line Tools or mas are missing, Burrow shows the command to install them.
+- **No compiled code in the workflow.** Moving to the Trash now uses macOS directly from Python, and Undo works as before.
+- **Burrow Companion:** the menu bar health score and the Updates and Browsers windows are now a separate, optional app (`Burrow-Companion.zip` in the release). `bumenu` opens it, or links to the download. The old menu bar helper and its login item are removed automatically.
+- **Updates:** Burrow no longer updates itself; Alfred Gallery handles that. Automatic update checks are now off until you turn them on in the Workflow’s Configuration.
+- **App Store updates** install from Burrow with mas, with one password prompt.
 - **Undo and rollback:**
   - Rolling back an update now works for apps in system-owned folders.
   - A cancelled password prompt keeps the rollback so you can retry.
@@ -11,24 +18,9 @@
 - **Update rollbacks stay available** even after lots of cleaning.
 - **Daily auto-install never quits** an app you've just opened.
 - **Clear the Cache of Every Closed Browser** is now one Undo step.
-- **Browsers:**
-  - Safari is detected as open.
-  - Database backups include recent data still being written.
-  - Orion RC is supported.
-  - A deleted profile no longer blocks the browser view.
-  - `bubrowsers` is faster.
-- **Offline:** `bu` and `buupdates` never wait for the network while you type, and a failed check says so.
+- **Browsers:** Safari is detected as open, database backups include recent data still being written, Orion RC is supported, a deleted profile no longer blocks the browser view, and `bubrowsers` is faster.
+- **Offline:** `burrow` and `buupdates` never wait for the network while you type, and a failed check says so.
 - **Update check:** no longer offers an unrelated app's update when two apps share a name (Helium browser).
-- **Window:**
-  - It has a menu (⌘Q, ⌘W, copy and paste) and shows rollback, skip and ignore results.
-  - It checks automatically the first time, and shows browser notes.
-  - Your browser choices are shared with Alfred.
-  - VoiceOver labels are improved.
-- **Menu bar:**
-  - The helper keeps working if the workflow folder moves.
-  - "Start at Login: Off" keeps the icon that's showing.
-  - Login items remove themselves if Burrow is deleted.
-
 ## 1.1.0
 
 - **Burrow window** with two sections:

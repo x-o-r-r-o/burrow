@@ -1,5 +1,7 @@
 build/
+build-companion/
 dist/
 __pycache__/
 *.pyc
 .DS_Store
+prefs.plist

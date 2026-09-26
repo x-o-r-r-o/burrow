@@ -176,10 +176,6 @@ def app_info_plist(app_path):
     return plist
 
 
-def running_process_names():
-    return set(l.strip() for l in sh(["/bin/ps", "-Aco", "comm="]).splitlines() if l.strip())
-
-
 def running_executables():
     """Full executable paths of every running process."""
     return [l.strip() for l in sh(["/bin/ps", "-Axo", "comm="]).splitlines() if l.strip()]
@@ -332,7 +328,60 @@ def save_state(name, data):
 # Trash and admin
 # ---------------------------------------------------------------------------
 
-TRASH_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "BurrowTrash")
+class _ObjC:
+    """Minimal bridge to macOS's Objective-C runtime, to call NSFileManager's
+    trashItemAtURL:resultingItemURL:error: directly (no compiled helper needed)."""
+
+    def __init__(self):
+        self.lib = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+        ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Foundation.framework/Foundation")
+        lib = self.lib
+        lib.objc_getClass.restype = ctypes.c_void_p
+        lib.objc_getClass.argtypes = [ctypes.c_char_p]
+        lib.sel_registerName.restype = ctypes.c_void_p
+        lib.sel_registerName.argtypes = [ctypes.c_char_p]
+        lib.objc_autoreleasePoolPush.restype = ctypes.c_void_p
+        lib.objc_autoreleasePoolPop.argtypes = [ctypes.c_void_p]
+
+    def send(self, restype, *argtypes):
+        # objc_msgSend needs the exact prototype on Apple silicon (it isn't variadic-safe)
+        return ctypes.cast(self.lib.objc_msgSend, ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes))
+
+    def cls(self, name):
+        return self.lib.objc_getClass(name.encode())
+
+    def sel(self, name):
+        return self.lib.sel_registerName(name.encode())
+
+    def trash(self, path):
+        """Move one item to the Trash; returns where it landed, or None."""
+        pool = self.lib.objc_autoreleasePoolPush()
+        try:
+            s = self.send(ctypes.c_void_p, ctypes.c_char_p)(self.cls("NSString"), self.sel("stringWithUTF8String:"), path.encode("utf-8"))
+            url = self.send(ctypes.c_void_p, ctypes.c_void_p)(self.cls("NSURL"), self.sel("fileURLWithPath:"), s)
+            fm = self.send(ctypes.c_void_p)(self.cls("NSFileManager"), self.sel("defaultManager"))
+            out, err = ctypes.c_void_p(), ctypes.c_void_p()
+            ok = self.send(ctypes.c_bool, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p))(
+                fm, self.sel("trashItemAtURL:resultingItemURL:error:"), url, ctypes.byref(out), ctypes.byref(err))
+            if not ok or not out.value:
+                return None
+            nspath = self.send(ctypes.c_void_p)(out.value, self.sel("path"))
+            cstr = self.send(ctypes.c_char_p)(nspath, self.sel("UTF8String"))
+            return cstr.decode("utf-8") if cstr else None
+        finally:
+            self.lib.objc_autoreleasePoolPop(pool)
+
+
+_OBJC = []
+
+
+def objc_trash(path):
+    try:
+        if not _OBJC:
+            _OBJC.append(_ObjC())
+        return _OBJC[0].trash(path)
+    except (OSError, AttributeError, UnicodeError):
+        return None
 
 # Backup when the compiled helper is missing (e.g. running from src/). It can't
 # report where items landed, so those moves can't be undone.
@@ -381,15 +430,11 @@ def trash_paths(paths, finder_fallback=True, label=None, batch_id=None, moved_ou
     moved = {}
     for start in range(0, len(paths), 500):
         chunk = paths[start:start + 500]
-        helper_ok = False
-        if os.access(TRASH_HELPER, os.X_OK):
-            try:
-                res = subprocess.run([TRASH_HELPER] + chunk, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                moved.update({k: v for k, v in json.loads(res.stdout.decode() or "").get("moved", {}).items() if v})
-                helper_ok = res.returncode == 0
-            except (OSError, ValueError, AttributeError):
-                pass  # blocked by Gatekeeper or damaged: use the built-in method below
-        if not helper_ok:
+        for p in chunk:
+            landed = objc_trash(p)  # the system's own "Move to Trash", reporting where it went
+            if landed:
+                moved[p] = landed
+        if any(os.path.lexists(p) and p not in moved for p in chunk):
             remaining = [p for p in chunk if os.path.lexists(p) and p not in moved]
             if remaining and (label or moved_out is not None) and not any(os.path.islink(p) for p in remaining):
                 # Undo needs to know where things went: Finder reports it (the JXA method can't)
@@ -3084,6 +3129,9 @@ def main(argv):
         sub = args[0] if args else "status"
         if sub == "status":
             print(json.dumps(touchid_status()))
+        elif sub not in ("enable", "disable"):
+            sys.stderr.write("usage: engine.py touchid [status|enable|disable]\n")
+            return 2
         else:
             ok, out = touchid_set(sub == "enable")
             print(json.dumps({"ok": ok, "output": out}))

@@ -91,8 +91,8 @@ class ScriptFilterJSONTest(unittest.TestCase):
             self.skipTest("build first")
         with open(os.path.join(build, "info.plist"), "rb") as f:
             info = plistlib.load(f)
-        for obj in info["objects"]:
-            if obj["config"].get("keyword") == "buclean":
+        for obj in info["objects"]:  # a keyword typed directly in the Script Filter
+            if obj["config"].get("keyword") == "{var:keyword_clean}":
                 obj["config"]["keyword"] = "sweep"
         with open(os.path.join(wf, "info.plist"), "wb") as f:
             plistlib.dump(info, f)
@@ -101,9 +101,13 @@ class ScriptFilterJSONTest(unittest.TestCase):
         try:
             words = burrow.load_keywords()
             self.assertEqual(words["clean"], "sweep")
-            self.assertEqual(words["status"], "bustatus")
+            self.assertEqual(words["status"], "bustatus")  # the configuration default
+            self.assertEqual(words["hub"], "burrow")
+            os.environ["keyword_status"] = "health"  # set in the Workflow's Configuration
+            self.assertEqual(burrow.load_keywords()["status"], "health")
         finally:
             burrow.WF_DIR = old
+            os.environ.pop("keyword_status", None)
             shutil.rmtree(wf, ignore_errors=True)
 
     def test_first_run_screen_is_valid_json(self):
@@ -114,13 +118,40 @@ class ScriptFilterJSONTest(unittest.TestCase):
         with open(os.path.join(wf, "run.sh"), "w") as f:
             f.write(script)
         cache = tempfile.mkdtemp()
-        open(os.path.join(cache, "clt-install-started"), "w").close()  # don't open Apple's installer
         out = subprocess.run(["/bin/bash", os.path.join(wf, "run.sh"), "hub", ""], stdout=subprocess.PIPE,
                              env=dict(os.environ, alfred_workflow_cache=cache)).stdout
         data = json.loads(out.decode())
-        self.assertEqual(data["rerun"], 2)
-        self.assertEqual([i.get("variables", {}).get("action") for i in data["items"]], [None, "setup", "setup_silent"])
+        self.assertNotIn("rerun", data)  # nothing is installed automatically, so nothing to wait for
+        self.assertEqual([i.get("variables", {}).get("action") for i in data["items"]], ["setup", None])
+        self.assertIn("xcode-select --install", data["items"][0]["subtitle"])
         shutil.rmtree(wf, ignore_errors=True)
+
+    def test_companion_rows(self):
+        real, real_emit, out = burrow.companion_path, burrow.emit, []
+        burrow.emit = lambda items, **k: out.append(items)
+        try:
+            burrow.companion_path = lambda: None
+            burrow.cmd_menubar("")
+            self.assertEqual(out[-1][0]["variables"]["action"], "open")
+            self.assertIsNone(burrow.window_item("updates", "t", "s"))  # no nagging where it's optional
+            burrow.companion_path = lambda: "/Applications/Burrow Companion.app"
+            burrow.cmd_menubar("")
+            self.assertEqual({i["variables"]["target"] for i in out[-1]}, {"menubar", "updates", "browsers"})
+            self.assertEqual(burrow.window_item("browsers", "t", "s")["variables"]["action"], "companion")
+        finally:
+            burrow.companion_path, burrow.emit = real, real_emit
+
+    def test_legacy_login_item_is_removed(self):
+        agent = os.path.join(tempfile.mkdtemp(), "io.github.burrow-alfred.menubar.plist")
+        open(agent, "w").close()
+        real, real_sh = burrow.LEGACY_AGENT, burrow.engine.sh
+        burrow.LEGACY_AGENT = agent
+        burrow.engine.sh = lambda *a, **k: ""  # don't stop a helper that's really running
+        try:
+            burrow.retire_legacy_helpers()
+            self.assertFalse(os.path.exists(agent))
+        finally:
+            burrow.LEGACY_AGENT, burrow.engine.sh = real, real_sh
 
     def test_queries_filter(self):
         data = run("hub", "clean")

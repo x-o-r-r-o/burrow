@@ -254,17 +254,7 @@ def app_store_installable(u):
     return u.get("source") == "App Store" and bool(u.get("adam_id")) and not u.get("ios") and bool(mas_path())
 
 
-def install_mas():
-    """Install mas with Homebrew so App Store updates can be installed from Burrow."""
-    brew = brew_path()
-    if not brew:
-        raise UpdateError("Homebrew isn't installed (see brew.sh)")
-    res = subprocess.run([brew, "install", "mas"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900,
-                         env=dict(os.environ, HOMEBREW_NO_AUTO_UPDATE="1", PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"))
-    if res.returncode != 0 or not mas_path():
-        tail = res.stdout.decode("utf-8", "replace").strip().splitlines()[-1:] or ["brew failed"]
-        raise UpdateError("couldn't install mas: " + tail[0][:150])
-    return "mas installed. App Store updates can now be installed from Burrow"
+MAS_INSTALL_COMMAND = "brew install mas"
 
 
 def install_app_store(updates_list):
@@ -436,7 +426,6 @@ def check_all():
     result = {"time": time.time(), "updates": updates, "current": len(current), "unknown": unknown,
               "checked": len(apps), "errors": errors}
     save_state(RESULTS, result)
-    check_self()  # refresh Burrow's own update status in the background run
     return result
 
 
@@ -746,71 +735,8 @@ def mark_replacement(batch_id):
 
 
 
-# ---------------------------------------------------------------------------
-# Burrow's own updates (GitHub releases of x-o-r-r-o/burrow)
-# ---------------------------------------------------------------------------
-
-SELF_REPO = "x-o-r-r-o/burrow"
-SELF_ASSET = "Burrow.alfredworkflow"
 WF_DIR = os.path.dirname(os.path.abspath(__file__))
 
-
-def burrow_version():
-    """This Burrow's version, or None when running from a source checkout (no info.plist)."""
-    try:
-        with open(os.path.join(WF_DIR, "info.plist"), "rb") as f:
-            return str(plistlib.load(f).get("version") or "") or None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def check_self(network=True):
-    """The latest Burrow release if it's newer than this one (checked at most every
-    12 hours). network=False only reads the last result (fast; for Script Filters)."""
-    if not network:
-        latest = load_state("memo-self-update.json").get("value") or {}
-        current = burrow_version()
-        if current and latest.get("url") and newer(latest.get("version"), current):
-            return dict(latest, installed=current)
-        return None
-    def compute():
-        rel = fetch_json("https://api.github.com/repos/{}/releases/latest".format(SELF_REPO))
-        assets = {a.get("name"): a.get("browser_download_url") for a in rel.get("assets") or []}
-        return {"version": str(rel.get("tag_name", "")).lstrip("v"), "url": assets.get(SELF_ASSET),
-                "sha256_url": assets.get(SELF_ASSET + ".sha256"), "notes": rel.get("html_url"),
-                "body": (rel.get("body") or "")[:1500]}
-    try:
-        latest = cached("self-update", 12 * 3600, compute)
-    except Exception:  # noqa: BLE001 — offline, rate-limited, or no release yet
-        return None
-    current = burrow_version()
-    if current and latest.get("url") and newer(latest.get("version"), current):
-        return dict(latest, installed=current)
-    return None
-
-
-def install_self(update):
-    """Download the new workflow, verify it, and hand it to Alfred to import
-    (Alfred shows its own Update dialog). Returns the downloaded path."""
-    import zipfile
-    if not (update.get("url") or "").startswith("https://github.com/"):
-        raise UpdateError("unexpected download location")
-    work = tempfile.mkdtemp(prefix="burrow-self-", dir=engine.CACHE_DIR)
-    path = os.path.join(work, "Burrow-{}.alfredworkflow".format(update["version"]))
-    expected = None
-    if update.get("sha256_url"):
-        expected = fetch(update["sha256_url"]).decode("utf-8", "replace").split()[0].strip().lower()
-    if not expected or not re.match(r"^[0-9a-f]{64}$", expected):
-        raise UpdateError("the release has no checksum, so it can't be verified")
-    download(update["url"], path, expected)
-    with zipfile.ZipFile(path) as z:
-        info = plistlib.loads(z.read("info.plist"))
-    if info.get("bundleid") != engine.BUNDLE_ID:
-        raise UpdateError("the download isn't Burrow")
-    if not burrow_version() or not newer(info.get("version"), burrow_version()):
-        raise UpdateError("the download isn't newer than this Burrow")
-    subprocess.run(["/usr/bin/open", path])
-    return path
 
 # ---------------------------------------------------------------------------
 # Automatic checks (a LaunchAgent that runs this file once a day)
@@ -872,11 +798,13 @@ def auto(mode):
     if not os.path.exists(__file__):
         sync_agent("off", __file__)  # Burrow was removed
         return
+    # Follow the Workflow's Configuration as it is now, not as it was when the agent was made
+    mode = _alfred_setting("auto_updates") or "off"
+    if mode not in ("notify", "install"):
+        sync_agent("off", __file__)
+        return
     result = check_all()
     ups = visible_updates(result)
-    mine = check_self()
-    if mine:
-        notify("Burrow {} is available. Open Alfred and type bu to update".format(mine["version"]))
     if not ups:
         return
     installed, failed = [], []
@@ -916,9 +844,8 @@ def window_state(check=False):
         "updates": [dict(u, size=None) for u in ups],
         "ignored": [{"bundle_id": k, "rule": v} for k, v in sorted(ignore.items())],
         "history": history(),
-        "self": check_self(network=False),
         "mas": bool(mas_path()), "brew": bool(brew_path()),
-        "mode": os.environ.get("auto_updates") or _alfred_setting("auto_updates") or "notify",
+        "mode": os.environ.get("auto_updates") or _alfred_setting("auto_updates") or "off",
         "failure": result.get("failure"),
     }
 
@@ -956,11 +883,6 @@ def cli(argv):
             state = window_state()
             state["error"] = "The check failed: {}".format(e)
             say(state)
-    elif cmd == "install-mas":
-        try:
-            say({"done": install_mas()})
-        except Exception as e:  # noqa: BLE001
-            say({"error": str(e)})
     elif cmd == "install":
         result = load_state(RESULTS)
         store = [u for u in visible_updates(result) if u["path"] in argv[1:] and u.get("source") == "App Store" and u.get("installable")]
@@ -1008,16 +930,6 @@ def cli(argv):
             say({"ok": not skipped, "restored": len(restored), "skipped": len(skipped),
                  "done": "Rolled back" if restored and not skipped else None,
                  "error": None if not skipped else "{} couldn't be put back".format(len(skipped))})
-    elif cmd == "self-update":
-        up = check_self()
-        if not up:
-            say({"error": "Burrow is up to date"})
-        else:
-            try:
-                install_self(up)
-                say({"done": "Click Update in Alfred's window to finish"})
-            except Exception as e:  # noqa: BLE001
-                say({"error": str(e)})
     else:
         say({"error": "unknown command"})
 

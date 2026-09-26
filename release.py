@@ -5,9 +5,10 @@
     2. Commit everything
     3. python3 release.py
 
-Builds dist/Burrow.alfredworkflow, writes its SHA-256 (Burrow verifies it before
-self-updating), tags v<version>, pushes, and creates the GitHub release with both
-files attached and the changelog section as release notes.
+Runs the tests, builds dist/Burrow.alfredworkflow and the optional
+dist/Burrow-Companion.zip, writes their SHA-256 checksums, tags v<version>, pushes,
+and creates the GitHub release with the files attached and the changelog section
+as release notes.
 """
 
 import hashlib
@@ -38,18 +39,21 @@ def main():
 
     run("/usr/bin/python3", "-m", "unittest", "discover", "tests")
     run("/usr/bin/python3", "build.py")
-    asset = os.path.join(ROOT, "dist", "Burrow.alfredworkflow")
-    digest = hashlib.sha256(open(asset, "rb").read()).hexdigest()
-    with open(asset + ".sha256", "w") as f:
-        f.write("{}  Burrow.alfredworkflow\n".format(digest))
+    run("/usr/bin/python3", "build.py", "--companion")
+    assets = [os.path.join(ROOT, "dist", name) for name in ("Burrow.alfredworkflow", "Burrow-Companion.zip")]
+    sums = os.path.join(ROOT, "dist", "SHA256SUMS")
+    with open(sums, "w") as f:
+        for asset in assets:
+            f.write("{}  {}\n".format(hashlib.sha256(open(asset, "rb").read()).hexdigest(), os.path.basename(asset)))
     notes = os.path.join(ROOT, "dist", "notes.md")
     with open(notes, "w") as f:
-        f.write(m.group(1).strip() + "\n\n**Install:** download `Burrow.alfredworkflow` and double-click it.\n"
-                "Already have Burrow? It offers this update in Alfred (type `bu`).\n\nSHA-256: `{}`\n".format(digest))
+        f.write(m.group(1).strip() + "\n\n**Install:** download `Burrow.alfredworkflow` and double-click it.\n\n"
+                "**Optional:** `Burrow-Companion.zip` adds the health score to the menu bar and the Updates and "
+                "Browsers windows. It isn't notarized; see the README for how to open it.\n")
 
     run("git", "tag", "-a", tag, "-m", "Burrow " + version)
     run("git", "push", "origin", "HEAD", tag)
-    run("gh", "release", "create", tag, asset, asset + ".sha256", "--title", "Burrow " + version, "--notes-file", notes)
+    run("gh", "release", "create", tag, *assets, sums, "--title", "Burrow " + version, "--notes-file", notes)
     print("Released", tag)
 
 

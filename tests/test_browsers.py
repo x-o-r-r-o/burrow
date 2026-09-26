@@ -17,7 +17,6 @@ os.environ.setdefault("alfred_workflow_cache", tempfile.mkdtemp())
 import browsers  # noqa: E402
 import engine  # noqa: E402
 
-HELPER = os.path.join(ROOT, "build", "bin", "BurrowTrash")
 NOW = time.time()
 OLD = NOW - 30 * 86400
 CHROME_T = lambda t: int((t + 11644473600) * 1e6)  # noqa: E731
@@ -84,10 +83,8 @@ def rows(db, sql):
         con.close()
 
 
-@unittest.skipUnless(os.access(HELPER, os.X_OK), "build first")
 class BrowserCleanTest(unittest.TestCase):
     def setUp(self):
-        engine.TRASH_HELPER = HELPER
         engine.CACHE_DIR = tempfile.mkdtemp()
         self.base = tempfile.mkdtemp(prefix="burrow-browsers-", dir=os.path.expanduser("~/Library/Caches"))
         self.old = (browsers.SUPPORT, browsers.CACHES)
@@ -168,7 +165,6 @@ class BrowserCleanTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(pdir, "places.sqlite")))
 
 
-@unittest.skipUnless(os.access(HELPER, os.X_OK), "build first")
 class BrowserSafetyTest(BrowserCleanTest):
     def test_extension_storage_survives_cookie_cleaning(self):
         pdir = os.path.join(self.chrome["root"], "Default")

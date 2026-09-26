@@ -2300,6 +2300,9 @@ def dispatch(action, target, p):
                          excluded=set(p.get("excluded") or []), reviewed=p.get("reviewed", False), reset=p.get("reset", False))
     elif action == "touchid":
         ok, out = engine.touchid_set(target == "enable")
+        if ok == "terminal":
+            subprocess.run(["/usr/bin/open", "-a", "Terminal", engine.touchid_terminal_command(out, target == "enable")])
+            return "macOS only allows this change from Terminal: finish it in the Terminal window that just opened"
         alfred_search(KEYWORDS["touchid"] + " ")
         if ok is None:
             return None

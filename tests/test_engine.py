@@ -525,3 +525,26 @@ class TouchIDAdminTest(unittest.TestCase):
         engine.touchid_status = lambda: {"enabled": True}
         self.fake_sudo("", code=1)  # Touch ID cancelled: sudo stopped before running anything
         self.assertIsNone(engine._sudo_with_touchid("true"))
+
+
+class TouchIDEnableTest(unittest.TestCase):
+    def test_blocked_by_macos_falls_back_to_terminal(self):
+        import subprocess
+        real, cache = engine.run_as_admin, engine.CACHE_DIR
+        engine.CACHE_DIR = tempfile.mkdtemp()
+        engine.run_as_admin = lambda s, p: (False, "/bin/sh: /etc/pam.d/sudo_local: Operation not permitted")
+        try:
+            ok, script = engine.touchid_set(True)
+            self.assertEqual(ok, "terminal")
+            path = engine.touchid_terminal_command(script, True)
+            target = os.path.join(tempfile.mkdtemp(), "sudo_local")
+            with open(path) as f:
+                body = f.read()
+            self.assertIn("sudo /bin/sh -c", body)
+            with open(path, "w") as f:
+                f.write(body.replace("sudo /bin/sh", "/bin/sh").replace(engine.SUDO_LOCAL, target))
+            subprocess.run(["/bin/sh", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(target) as f:
+                self.assertTrue(engine.PAM_TID_RE.search(f.read()))
+        finally:
+            engine.run_as_admin, engine.CACHE_DIR = real, cache

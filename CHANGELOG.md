@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.2
+
+- **Touch ID for sudo** (`butouchid`) couldn't be turned on: macOS now only allows changing `/etc/pam.d` from Terminal, so Burrow showed a “Couldn't change” error. When macOS blocks it, Burrow opens Terminal with the command ready for your password.
+- On a Mac with Touch ID, Burrow's password prompt says how to use Touch ID instead.
+
 ## 1.4.1
 
 - **Uninstall:** apps installed as the system (root), such as MetaTrader 5, now ask for your password instead of failing with “Couldn't move … to the Trash”. If macOS refuses to move anything else, Burrow retries it through the password prompt. App updates benefit from the same fix.

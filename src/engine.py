@@ -663,6 +663,8 @@ def run_as_admin(script, prompt):
     via_touchid = _sudo_with_touchid(script)
     if via_touchid is not None:
         return via_touchid
+    if has_touchid() and not touchid_status()["enabled"]:
+        prompt += "\n\nTo use Touch ID here instead, turn on Touch ID for sudo in Burrow ({}).".format(os.environ.get("keyword_touchid") or "butouchid")
     res = subprocess.run(
         ["/usr/bin/osascript", "-e", "on run argv", "-e", "do shell script (item 1 of argv) with prompt (item 2 of argv) with administrator privileges", "-e", "end run", script, prompt],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -2931,6 +2933,11 @@ def _read(path):
         return ""
 
 
+def has_touchid():
+    """This Mac has Touch ID set up for unlocking."""
+    return bool(re.search(r"Biometrics for unlock: 1", sh(["/usr/bin/bioutil", "-r", "-s"])))
+
+
 def touchid_status():
     supported = os.path.exists(SUDO_LOCAL) or os.path.exists(SUDO_LOCAL + ".template")
     in_local = bool(PAM_TID_RE.search(_read(SUDO_LOCAL)))
@@ -2951,9 +2958,31 @@ def touchid_set(enable):
         script = "sed -i '' -E 's/^([[:space:]]*auth[[:space:]]+sufficient[[:space:]]+pam_tid\\.so)/#\\1/' {}".format(SUDO_LOCAL)
         prompt = "Burrow needs your password to turn off Touch ID for sudo."
     ok, out = run_as_admin(script, prompt)
+    if ok is not None and "Operation not permitted" in out:
+        # macOS only lets Terminal change /etc/pam.d, even for an administrator
+        return "terminal", script
     if ok and touchid_status()["enabled"] != enable:
         return False, "the change didn't take effect; check /etc/pam.d/sudo_local"
     return ok, out
+
+
+def touchid_terminal_command(script, enable):
+    """A .command file that makes the change with sudo in Terminal (Apple's documented way)."""
+    import shlex
+    path = os.path.join(CACHE_DIR, "touchid.command")
+    what = "on" if enable else "off"
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\n"
+                "clear\n"
+                "echo 'Burrow: turning Touch ID for sudo {w}.'\n"
+                "echo 'macOS only allows this change from Terminal. Enter your Mac password (it stays hidden as you type).'\n"
+                "echo\n"
+                "if sudo /bin/sh -c {s}; then echo; echo 'Done: Touch ID for sudo is {w}.'; "
+                "else echo; echo 'It did not work. See the message above.'; fi\n"
+                "echo; echo 'You can close this window.'\n"
+                "rm -f \"$0\"\n".format(w=what, s=shlex.quote(script)))
+    os.chmod(path, 0o700)
+    return path
 
 
 # ---------------------------------------------------------------------------

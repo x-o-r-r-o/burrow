@@ -390,7 +390,7 @@ HUB = [
     ("purge", "Purge Dev Artifacts", "Remove old node_modules, .next, dist, target, venv…", "purge"),
     ("installer", "Clean Installers", "Remove .dmg, .pkg and .iso files", "installer"),
     ("touchid", "Touch ID for Sudo", "Use your fingerprint instead of a password for sudo", "touchid-green"),
-    ("menubar", "Burrow Companion", "Optional app: health score in the menu bar, Updates and Browsers windows", "menubar"),
+    ("menubar", "Burrow Companion", "Optional app: health score in the menu bar, Updates, Browsers and Uninstaller windows", "menubar"),
 ]
 
 
@@ -912,6 +912,9 @@ def cmd_uninstall(query):
     if by_size:
         apps.sort(key=lambda a: -sizes.get(a["path"], 0))
     items = []
+    win = window_item("uninstall", "Open the Uninstaller Window", "Every app with its leftovers, checkboxes for what to keep, and Undo")
+    if win and not words:
+        items.append(win)
     if not words and not stale:
         unused = [a for a in apps if (last_used.get(a["path"]) or 0) < cutoff]
         if unused:
@@ -2050,7 +2053,7 @@ def cmd_menubar(query):
     if not companion_path():
         emit([
             item("Get Burrow Companion (Optional)",
-                 "↩ Download page · menu bar health score, Updates and Browsers windows",
+                 "↩ Download page · menu bar health score, Updates, Browsers and Uninstaller windows",
                  icon("menubar"), act("open", COMPANION_URL), mods={"cmd": mod("⌘ Copy the download link", act("copy", COMPANION_URL))}),
             item("Everything Else Works Without It", "Status, updates and browser cleaning are all available in Alfred", icon("check"), valid=False),
         ])
@@ -2059,6 +2062,7 @@ def cmd_menubar(query):
         item("Open Burrow Companion", "↩ Menu bar health score, refresh interval and Start at Login", icon("menubar"), act("companion", "menubar")),
         item("Open the Updates Window", "Release notes, update all, roll back, with progress for each app", icon("menubar"), act("companion", "updates")),
         item("Open the Browsers Window", "Choose what to clean with switches, for every browser", icon("menubar"), act("companion", "browsers")),
+        item("Open the Uninstaller Window", "Every app with its leftovers, checkboxes for what to keep, and Undo", icon("menubar"), act("companion", "uninstall")),
     ])
 
 

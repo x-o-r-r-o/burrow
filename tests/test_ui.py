@@ -136,7 +136,7 @@ class ScriptFilterJSONTest(unittest.TestCase):
             self.assertIsNone(burrow.window_item("updates", "t", "s"))  # no nagging where it's optional
             burrow.companion_path = lambda: "/Applications/Burrow Companion.app"
             burrow.cmd_menubar("")
-            self.assertEqual({i["variables"]["target"] for i in out[-1]}, {"menubar", "updates", "browsers"})
+            self.assertEqual({i["variables"]["target"] for i in out[-1]}, {"menubar", "updates", "browsers", "uninstall"})
             self.assertEqual(burrow.window_item("browsers", "t", "s")["variables"]["action"], "companion")
         finally:
             burrow.companion_path, burrow.emit = real, real_emit

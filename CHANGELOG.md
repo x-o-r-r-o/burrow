@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0
+
+- **Uninstaller window** in Burrow Companion: every app with its size and when it was last opened (filter by Unused or Largest), everything it installed with a checkbox to keep any item, the developer's own uninstaller and system extensions when there are any, and Uninstall, Reset and Undo. It uses the same engine as `buuninstall`, and items you keep are shared with Alfred.
+- **Search fields** in the App Updates, Browsers and Uninstaller windows.
+- `buuninstall` and `bumenu` open the Uninstaller window when Burrow Companion is installed.
+- Burrow Companion's messages now point to `burrow` for Undo.
+
 ## 1.3.0
 
 - **Processes** (`bukill`): see what's using CPU and memory, with live CPU measured like Activity Monitor and each app's helpers grouped under it. Quit apps normally, end or force quit any process (other users' processes ask for your password), or restart an app. Critical parts of macOS get a warning first, and a reused PID is never ended by mistake.

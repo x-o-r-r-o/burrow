@@ -149,13 +149,15 @@ Open any command from other apps and scripts with `alfred://runtrigger/io.github
 
 ### Burrow Companion (Optional)
 
-Burrow Companion is a separate app that shows the health score in the menu bar, and opens App Updates and Browsers in a window with switches, progress bars and release notes. Burrow works fully without it.
+Burrow Companion is a separate app that shows the health score in the menu bar, and opens App Updates, Browsers and the Uninstaller in a window. The Uninstaller lists every app with its size and last use (filter by Unused or Largest), shows everything an app installed with a checkbox to keep any item, and uninstalls or resets it with Undo. Burrow works fully without it.
 
 Download `Burrow-Companion.zip` from the [latest release](https://github.com/x-o-r-r-o/burrow/releases/latest) and move the app to Applications. It isn't notarized by Apple, so the first time, open it, then click **Open Anyway** in **System Settings → Privacy & Security**.
 
 ![Burrow Companion's Updates window](images/about/companion-updates.png)
 
 ![Burrow Companion's Browsers window](images/about/companion-browsers.png)
+
+![Burrow Companion's Uninstaller window](images/about/companion-uninstall.png)
 
 ## Privacy
 

@@ -42,7 +42,7 @@ SCRIPT_FILTERS = [
     ("large", "bularge", "Large Files", "Find the biggest files in your home folder", "large", "Searching…"),
     ("dupes", "budupes", "Duplicate Files", "Find identical copies of files", "dupes", "Searching…"),
     ("startup", "bustartup", "Startup Items", "Launch agents and daemons", "startup", "Loading…"),
-    ("menubar", "bumenu", "Burrow Companion", "Optional app: health in the menu bar, Updates and Browsers windows", "menubar", "Checking…"),
+    ("menubar", "bumenu", "Burrow Companion", "Optional app: health in the menu bar, Updates, Browsers and Uninstaller windows", "menubar", "Checking…"),
 ]
 
 
@@ -360,7 +360,7 @@ def main():
     os.makedirs(BUILD)
     os.makedirs(DIST, exist_ok=True)
 
-    for name in ("burrow.py", "engine.py", "updates.py", "browsers.py", "run.sh"):
+    for name in ("burrow.py", "engine.py", "updates.py", "browsers.py", "uninstaller.py", "run.sh"):
         shutil.copy(os.path.join(SRC, name), BUILD)
     os.chmod(os.path.join(BUILD, "run.sh"), 0o755)
     shutil.copytree(os.path.join(SRC, "icons"), os.path.join(BUILD, "icons"), ignore=shutil.ignore_patterns(".*", "__pycache__"))

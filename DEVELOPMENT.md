@@ -7,6 +7,7 @@
 - `src/engine.py` does the scanning and maintenance work, and moves files to the Trash (through `NSFileManager`, so every move can be undone).
 - `src/updates.py` checks for and installs app updates.
 - `src/browsers.py` finds browsers, and cleans or resets them.
+- `src/uninstaller.py` is the command line Burrow Companion's Uninstaller window uses.
 - `tools/companion/BurrowCompanion.swift` is Burrow Companion, the optional menu bar app and window. It's a separate download, not part of the workflow.
 - `build.py` generates `info.plist` and packages the workflow.
 

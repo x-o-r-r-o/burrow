@@ -2,7 +2,7 @@
 //
 // It finds the installed Burrow workflow in Alfred's preferences and runs its Python
 // (engine.py, updates.py, browsers.py), so every action has the same safety checks as
-// Alfred. Open sections with burrow-companion://updates or burrow-companion://browsers.
+// Alfred. Open sections with burrow-companion://updates, …://browsers or …://uninstall.
 import AppKit
 import ServiceManagement
 import SwiftUI
@@ -88,6 +88,28 @@ func relative(_ t: Double?) -> String {
     guard let t = t else { return "never" }
     let f = RelativeDateTimeFormatter(); f.unitsStyle = .full
     return f.localizedString(for: Date(timeIntervalSince1970: t), relativeTo: Date())
+}
+
+/// A search field above a list (the window has no toolbar for .searchable).
+struct SearchField: View {
+    @Binding var text: String
+    let prompt: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField(prompt, text: $text).textFieldStyle(.plain)
+            if !text.isEmpty {
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain).accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(Color(nsColor: .textBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.secondary.opacity(0.3)))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .padding(8)
+    }
 }
 
 // MARK: - App updates
@@ -202,6 +224,8 @@ struct UpdatesView: View {
             }
             Divider()
             HSplitView {
+                VStack(spacing: 0) {
+                SearchField(text: $ui.filter, prompt: "Search apps")
                 List(selection: $ui.selection) {
                     let ready = visible.filter { $0.installable }
                     let store = visible.filter { !$0.installable }
@@ -232,7 +256,7 @@ struct UpdatesView: View {
                         }
                     }
                 }
-                .searchable(text: $ui.filter, placement: .sidebar, prompt: "Filter apps")
+                }
                 .frame(minWidth: 320)
                 detail.frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -397,20 +421,21 @@ final class BrowsersModel: ObservableObject {
         let cats = (chosen[b.id] ?? []).sorted().joined(separator: ",")
         runCLI("browsers.py", ["clean", b.id, cats, range[b.id] ?? "all", profilesArg(b)], onLine: { o in
             if let e = o["error"] as? String { self.message = "Couldn't clean \(b.name): \(e)" }
-            else { self.message = "\(b.name) cleaned · \(formatBytes(o["freed"] as? Double ?? 0)) moved to the Trash · undo in Alfred with bu" }
+            else { self.message = "\(b.name) cleaned · \(formatBytes(o["freed"] as? Double ?? 0)) moved to the Trash · undo in Alfred with burrow" }
         }, done: { self.busy = nil; self.load() })
     }
 
     func reset(_ b: BrowserInfo, full: Bool) {
         busy = b.id
         runCLI("browsers.py", ["reset", b.id, full ? "full" : "settings", "", profilesArg(b)], onLine: { o in
-            self.message = (o["error"] as? String).map { "Couldn't reset \(b.name): \($0)" } ?? "\(b.name) \(full ? "fully reset" : "settings reset") · undo in Alfred with bu"
+            self.message = (o["error"] as? String).map { "Couldn't reset \(b.name): \($0)" } ?? "\(b.name) \(full ? "fully reset" : "settings reset") · undo in Alfred with burrow"
         }, done: { self.busy = nil; self.load() })
     }
 }
 
 final class BrowsersUI: ObservableObject {
     @Published var selection: String?
+    @Published var filter = ""
     @Published var confirm: String?   // "clean", "passwords", "reset", "full"
 }
 
@@ -421,8 +446,10 @@ struct BrowsersView: View {
     var body: some View {
         VStack(spacing: 0) {
             HSplitView {
+                VStack(spacing: 0) {
+                SearchField(text: $ui.filter, prompt: "Search browsers")
                 List(selection: $ui.selection) {
-                    ForEach(model.browsers) { b in
+                    ForEach(model.browsers.filter { ui.filter.isEmpty || $0.name.localizedCaseInsensitiveContains(ui.filter) }) { b in
                         HStack(spacing: 10) {
                             if let app = b.app { Image(nsImage: NSWorkspace.shared.icon(forFile: app)).resizable().frame(width: 28, height: 28) }
                             else { Image(systemName: "globe").frame(width: 28, height: 28) }
@@ -435,6 +462,7 @@ struct BrowsersView: View {
                             }
                         }.tag(b.id)
                     }
+                }
                 }.frame(minWidth: 240)
                 detail.frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -548,11 +576,326 @@ struct BrowsersView: View {
         case "full":
             let n = b.profiles.count
             let which = n > 1 && (model.profile[b.id] ?? "all") == "all" ? "All \(n) profiles of \(b.name)" : "The profile"
-            return "\(which): bookmarks, history, passwords, extensions, cookies and settings all go to the Trash. You can undo this in Alfred with bu."
+            return "\(which): bookmarks, history, passwords, extensions, cookies and settings all go to the Trash. You can undo this in Alfred with burrow."
         case "reset": return b.kind == "chromium"
             ? "Settings go back to their defaults. Extensions and their stored data (for example a wallet or password-manager extension's local vault) move to the Trash; Undo brings them back. Bookmarks, history and passwords stay."
             : "Settings go back to their defaults. Extensions, bookmarks, history and passwords stay."
-        default: return "Everything goes to the Trash first, so you can undo it in Alfred with bu."
+        default: return "Everything goes to the Trash first, so you can undo it in Alfred with burrow."
+        }
+    }
+}
+
+// MARK: - Uninstaller
+
+struct InstalledApp: Identifiable, Hashable {
+    let id: String          // app path
+    let name: String
+    let size: Double
+    let lastUsed: Double?
+    let knownUse: Bool
+    let modified: Double?
+    let running: Bool
+
+    var usage: String {
+        if let t = lastUsed { return "opened \(relative(t))" }
+        if knownUse { return "no recorded use" }
+        if let m = modified { return "modified \(relative(m))" }
+        return ""
+    }
+}
+
+struct Leftover: Identifiable, Hashable {
+    let id: String          // path
+    let name, location: String
+    let size: Double
+    let locked, data: Bool
+    var kept: Bool
+}
+
+struct AppReview {
+    let path, name, version: String
+    let size: Double
+    let locked, running: Bool
+    var items: [Leftover]
+    let extensions: [String]
+    let uninstallers: [String]
+}
+
+final class UninstallModel: ObservableObject {
+    @Published var apps: [InstalledApp] = []
+    @Published var loaded = false
+    @Published var sizing = false
+    @Published var unusedDays = 90
+    @Published var undoLabel: String?
+    @Published var review: AppReview?
+    @Published var reviewing = false
+    @Published var busy = false
+    @Published var message: String?
+    @Published var stillRunning: String?   // app path that didn't quit when asked
+
+    func load() {
+        runCLI("uninstaller.py", ["list"], onLine: { o in
+            self.loaded = true
+            self.sizing = o["sizing"] as? Bool ?? false
+            self.unusedDays = o["unused_days"] as? Int ?? 90
+            self.undoLabel = o["undo"] as? String
+            self.apps = (o["apps"] as? [[String: Any]] ?? []).map { a in
+                InstalledApp(id: a["path"] as? String ?? "", name: a["name"] as? String ?? "", size: a["size"] as? Double ?? 0,
+                             lastUsed: a["last_used"] as? Double, knownUse: a["known_use"] as? Bool ?? false,
+                             modified: a["mtime"] as? Double, running: a["running"] as? Bool ?? false)
+            }
+        }, done: {
+            // Sizes are measured in the background the first time: check back shortly
+            if self.sizing { DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.load() } }
+        })
+    }
+
+    func loadReview(_ path: String?) {
+        guard let path = path else { review = nil; return }
+        reviewing = true
+        runCLI("uninstaller.py", ["review", path], onLine: { o in
+            guard (o["path"] as? String) == path else { self.review = nil; self.message = o["error"] as? String; return }
+            self.review = AppReview(
+                path: path, name: o["name"] as? String ?? "", version: o["version"] as? String ?? "",
+                size: o["size"] as? Double ?? 0, locked: o["locked"] as? Bool ?? false, running: o["running"] as? Bool ?? false,
+                items: (o["items"] as? [[String: Any]] ?? []).map { i in
+                    Leftover(id: i["path"] as? String ?? "", name: i["name"] as? String ?? "", location: i["location"] as? String ?? "",
+                             size: i["size"] as? Double ?? 0, locked: i["locked"] as? Bool ?? false, data: i["data"] as? Bool ?? false,
+                             kept: i["kept"] as? Bool ?? false)
+                },
+                extensions: o["extensions"] as? [String] ?? [], uninstallers: o["uninstallers"] as? [String] ?? [])
+        }, done: { self.reviewing = false })
+    }
+
+    /// Keep a leftover, or include it again (shared with Alfred's review screen).
+    func toggle(_ item: Leftover) {
+        guard var r = review, let i = r.items.firstIndex(of: item) else { return }
+        r.items[i].kept.toggle()
+        review = r
+        runCLI("uninstaller.py", ["toggle", r.path, item.id], onLine: { _ in })
+    }
+
+    func run(reset: Bool, force: Bool = false) {
+        guard let r = review else { return }
+        busy = true
+        stillRunning = nil
+        message = reset ? "Resetting \(r.name)…" : "Uninstalling \(r.name)…"
+        let req: [String: Any] = ["path": r.path, "reset": reset, "force": force]
+        guard let data = try? JSONSerialization.data(withJSONObject: req), let json = String(data: data, encoding: .utf8) else { return }
+        runCLI("uninstaller.py", ["uninstall", json], onLine: { o in
+            if let d = o["done"] as? String { self.message = d }
+            else if let e = o["error"] as? String {
+                self.message = e
+                if o["running"] as? Bool ?? false { self.stillRunning = r.path }
+            }
+        }, done: {
+            self.busy = false
+            self.load()
+            self.loadReview(FileManager.default.fileExists(atPath: r.path) ? r.path : nil)
+        })
+    }
+
+    func undo() {
+        busy = true
+        runCLI("uninstaller.py", ["undo"], onLine: { o in
+            self.message = (o["done"] ?? o["error"]) as? String
+        }, done: {
+            self.busy = false
+            self.load()
+            if let r = self.review { self.loadReview(r.path) }
+        })
+    }
+}
+
+final class UninstallUI: ObservableObject {
+    @Published var selection: InstalledApp.ID?
+    @Published var filter = ""
+    @Published var scope = "all"       // all, unused, largest
+    @Published var confirm: String?     // "uninstall", "reset", "force", "undo"
+}
+
+struct UninstallView: View {
+    @ObservedObject var model: UninstallModel
+    @StateObject private var ui = UninstallUI()
+
+    var visible: [InstalledApp] {
+        var list = model.apps
+        if !ui.filter.isEmpty { list = list.filter { $0.name.localizedCaseInsensitiveContains(ui.filter) } }
+        let cutoff = Date().timeIntervalSince1970 - Double(model.unusedDays) * 86400
+        switch ui.scope {
+        case "unused": list = list.filter { ($0.lastUsed ?? 0) < cutoff }.sorted { $0.size > $1.size }
+        case "largest": list = list.sorted { $0.size > $1.size }
+        default: break
+        }
+        return list
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HSplitView {
+                VStack(spacing: 0) {
+                    Picker("Show", selection: $ui.scope) {
+                        Text("All").tag("all")
+                        Text("Unused").tag("unused")
+                        Text("Largest").tag("largest")
+                    }
+                    .pickerStyle(.segmented).labelsHidden().padding([.horizontal, .top], 8)
+                    SearchField(text: $ui.filter, prompt: "Search apps")
+                    List(selection: $ui.selection) {
+                        ForEach(visible) { a in
+                            HStack(spacing: 10) {
+                                Image(nsImage: NSWorkspace.shared.icon(forFile: a.id)).resizable().frame(width: 28, height: 28)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(a.name).fontWeight(.medium)
+                                    Text([a.size > 0 ? formatBytes(a.size) : "", a.usage, a.running ? "open" : ""]
+                                            .filter { !$0.isEmpty }.joined(separator: " · "))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }.tag(a.id)
+                        }
+                    }
+                    if model.sizing {
+                        HStack { ProgressView().controlSize(.small); Text("Measuring app sizes…").font(.caption).foregroundStyle(.secondary) }.padding(6)
+                    }
+                }.frame(minWidth: 260)
+                detail.frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Divider()
+            HStack {
+                if model.busy { ProgressView().controlSize(.small) }
+                Text(model.message ?? "Everything goes to the Trash, so it can be put back.").font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                Spacer()
+                if let label = model.undoLabel {
+                    Button("Undo “\(label)”") { ui.confirm = "undo" }.disabled(model.busy)
+                }
+            }.padding(8)
+        }
+        .onAppear { model.load() }
+        .onReceive(model.$apps) { list in
+            if ui.selection == nil || !list.contains(where: { $0.id == ui.selection }) {
+                ui.selection = ProcessInfo.processInfo.environment["BURROW_SELECT"].flatMap { p in list.first { $0.id == p }?.id } ?? visible.first?.id
+            }
+        }
+        .onChange(of: ui.selection) { id in model.stillRunning = nil; model.loadReview(id) }
+        .alert(alertTitle, isPresented: Binding(get: { ui.confirm != nil }, set: { if !$0 { ui.confirm = nil } })) {
+            let what = ui.confirm
+            Button(what == "undo" ? "Undo" : (what == "reset" ? "Reset" : (what == "force" ? "Force quit and uninstall" : "Uninstall")),
+                   role: what == "undo" ? nil : .destructive) {
+                switch what {
+                case "undo": model.undo()
+                case "reset": model.run(reset: true)
+                case "force": model.run(reset: false, force: true)
+                default: model.run(reset: false)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text(alertMessage) }
+    }
+
+    var removing: [Leftover] { (model.review?.items ?? []).filter { !$0.kept } }
+
+    @ViewBuilder var detail: some View {
+        if let r = model.review, r.path == ui.selection {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Image(nsImage: NSWorkspace.shared.icon(forFile: r.path)).resizable().frame(width: 48, height: 48)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text([r.name, r.version].filter { !$0.isEmpty }.joined(separator: " ")).font(.title3).fontWeight(.semibold)
+                        Text("\(formatBytes(r.size + removing.reduce(0) { $0 + $1.size })) with leftovers" + (r.running ? " · open now" : ""))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: r.path)]) } label: { Label("Reveal", systemImage: "folder") }
+                }
+                ForEach(r.uninstallers, id: \.self) { u in
+                    HStack {
+                        Label("The developer's uninstaller also removes drivers and extensions", systemImage: "wrench.and.screwdriver")
+                        Spacer()
+                        Button("Open \((u as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: ""))") { NSWorkspace.shared.open(URL(fileURLWithPath: u)) }
+                    }.padding(8).background(Color.accentColor.opacity(0.1)).clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                ForEach(r.extensions, id: \.self) { e in
+                    HStack {
+                        Label("Has a system extension (\(e)). macOS removes it in Login Items & Extensions.", systemImage: "exclamationmark.triangle")
+                        Spacer()
+                        Button("Open Settings") { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!) }
+                    }.padding(8).background(Color.orange.opacity(0.12)).clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                if r.running {
+                    Label("\(r.name) is open and will be quit first", systemImage: "exclamationmark.triangle").font(.callout)
+                }
+                Text(r.items.isEmpty ? "No leftover files found" : "What will be removed · untick anything you want to keep")
+                    .font(.callout).foregroundStyle(.secondary)
+                List {
+                    HStack {
+                        Image(systemName: "checkmark.square.fill").foregroundStyle(.secondary)
+                        Text("\(r.name).app").fontWeight(.medium)
+                        if r.locked { Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary) }
+                        Spacer()
+                        Text(formatBytes(r.size)).foregroundStyle(.secondary)
+                    }
+                    ForEach(r.items) { i in
+                        HStack {
+                            Toggle(isOn: Binding(get: { !i.kept }, set: { _ in model.toggle(i) })) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    HStack(spacing: 4) {
+                                        Text(i.name)
+                                        if i.locked { Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary) }
+                                    }
+                                    Text(i.location).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Text(formatBytes(i.size)).foregroundStyle(.secondary)
+                        }
+                        .contextMenu {
+                            Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: i.id)]) }
+                            Button("Copy Path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(i.id, forType: .string) }
+                        }
+                    }
+                }
+                .listStyle(.bordered(alternatesRowBackgrounds: false))
+                if r.locked || removing.contains(where: { $0.locked }) {
+                    Label("Items with a lock belong to the system, so macOS asks for your password once", systemImage: "lock").font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    if model.stillRunning == r.path {
+                        Button("Force quit and uninstall") { ui.confirm = "force" }.disabled(model.busy)
+                    }
+                    if removing.contains(where: { $0.data }) {
+                        Button("Reset app") { ui.confirm = "reset" }.disabled(model.busy)
+                            .help("Keep the app, remove its settings and data so it starts fresh")
+                    }
+                    Spacer()
+                    Button("Uninstall · \(formatBytes(r.size + removing.reduce(0) { $0 + $1.size }))") { ui.confirm = "uninstall" }
+                        .disabled(model.busy).keyboardShortcut(.defaultAction)
+                }
+            }.padding(16)
+        } else if model.reviewing || (ui.selection != nil && model.review == nil && model.loaded) {
+            VStack(spacing: 8) { ProgressView(); Text("Looking for leftover files…").foregroundStyle(.secondary) }
+        } else {
+            Text(!model.loaded ? "Listing apps…" : "Select an app to see everything it installed").foregroundStyle(.secondary)
+        }
+    }
+
+    var alertTitle: String {
+        let name = model.review?.name ?? "the app"
+        switch ui.confirm {
+        case "undo": return "Undo “\(model.undoLabel ?? "")”?"
+        case "reset": return "Reset \(name)?"
+        case "force": return "Force quit \(name)?"
+        default: return "Uninstall \(name)?"
+        }
+    }
+
+    var alertMessage: String {
+        guard let r = model.review else { return "Everything goes back where it was." }
+        let open = r.running ? "\(r.name) will be quit first. " : ""
+        switch ui.confirm {
+        case "undo": return "Everything it moved to the Trash goes back where it was. Apps that are open are quit first."
+        case "reset": return open + "Its settings, caches and data go to the Trash. The app stays installed and starts fresh."
+        case "force": return "Unsaved changes in \(r.name) are lost. Then \(r.name) and \(removing.count) leftover items go to the Trash."
+        default: return open + "\(r.name) and \(removing.count) leftover items go to the Trash. You can put them back with Undo."
         }
     }
 }
@@ -568,6 +911,7 @@ final class RootUI: ObservableObject {
 struct RootView: View {
     @StateObject var updates = UpdatesModel()
     @StateObject var browsers = BrowsersModel()
+    @StateObject var uninstaller = UninstallModel()
     @StateObject var ui = RootUI()
 
     var body: some View {
@@ -575,6 +919,7 @@ struct RootView: View {
             VStack(alignment: .leading, spacing: 4) {
                 sidebarButton("updates", "App updates", "arrow.down.circle", updates.updates.count)
                 sidebarButton("browsers", "Browsers", "globe", 0)
+                sidebarButton("uninstall", "Uninstaller", "trash", 0)
                 Spacer()
             }
             .padding(10)
@@ -582,7 +927,9 @@ struct RootView: View {
             .background(Color(nsColor: .windowBackgroundColor))
             Divider()
             Group {
-                if ui.section == "browsers" { BrowsersView(model: browsers) } else { UpdatesView(model: updates) }
+                if ui.section == "browsers" { BrowsersView(model: browsers) }
+                else if ui.section == "uninstall" { UninstallView(model: uninstaller) }
+                else { UpdatesView(model: updates) }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 860, minHeight: 540)
@@ -743,7 +1090,7 @@ final class MenuBar: NSObject {
             menu.addItem(get)
         } else {
             for (title, target, key) in [
-                ("App Updates…", "window:updates", "u"), ("Browsers…", "window:browsers", "b"),
+                ("App Updates…", "window:updates", "u"), ("Browsers…", "window:browsers", "b"), ("Uninstaller…", "window:uninstall", "i"),
                 ("System Status in Alfred", "status", "s"), ("Clean System in Alfred", "clean", "c"),
                 ("Analyze Disk in Alfred", "analyze", "a"), ("Optimize System in Alfred", "optimize", "o"),
             ] {
@@ -822,7 +1169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         buildMainMenu()
         menuBar = MenuBar(openWindow: { [weak self] section in self?.showWindow(section) })
-        if CommandLine.arguments.count > 1, ["updates", "browsers"].contains(CommandLine.arguments[1]) {
+        if CommandLine.arguments.count > 1, ["updates", "browsers", "uninstall"].contains(CommandLine.arguments[1]) {
             showWindow(CommandLine.arguments[1])
         }
     }

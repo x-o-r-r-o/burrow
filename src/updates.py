@@ -753,7 +753,7 @@ def sync_agent(mode, script_path):
         "Label": AGENT_LABEL,
         "ProgramArguments": ["/bin/sh", "-c",
                              'if [ -f "$0" ]; then exec /usr/bin/python3 "$0" auto "$1"; '
-                             'else /bin/launchctl bootout gui/$(id -u)/{0} 2>/dev/null; rm -f "$HOME/Library/LaunchAgents/{0}.plist"; fi'.format(AGENT_LABEL),
+                             'else rm -f "$HOME/Library/LaunchAgents/{0}.plist"; /bin/launchctl bootout gui/$(id -u)/{0} 2>/dev/null; fi'.format(AGENT_LABEL),
                              script_path, mode],
         "StartCalendarInterval": {"Hour": 10, "Minute": 30},
         "RunAtLoad": False,
@@ -774,11 +774,12 @@ def sync_agent(mode, script_path):
         subprocess.run(["/bin/launchctl", "bootout", "gui/{}/{}".format(uid, AGENT_LABEL)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["/bin/launchctl", "bootstrap", "gui/{}".format(uid), AGENT_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     elif not want and current is not None:
-        subprocess.run(["/bin/launchctl", "bootout", "gui/{}/{}".format(os.getuid(), AGENT_LABEL)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Remove the file first: when the daily run turns itself off, bootout ends this process
         try:
             os.remove(AGENT_PATH)
         except OSError:
             pass
+        subprocess.run(["/bin/launchctl", "bootout", "gui/{}/{}".format(os.getuid(), AGENT_LABEL)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def notify(message):

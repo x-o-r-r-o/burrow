@@ -383,8 +383,17 @@ def objc_trash(path):
     except (OSError, AttributeError, UnicodeError):
         return None
 
-# Backup when the compiled helper is missing (e.g. running from src/). It can't
-# report where items landed, so those moves can't be undone.
+# Last resort when the Objective-C bridge can't load. It can't report where items
+# landed, so those moves can't be undone.
+def _objc_available():
+    try:
+        if not _OBJC:
+            _OBJC.append(_ObjC())
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
 TRASH_JXA = """
 ObjC.import('Foundation');
 function run(argv) {
@@ -428,27 +437,21 @@ def trash_paths(paths, finder_fallback=True, label=None, batch_id=None, moved_ou
     become one undo step. Returns what failed."""
     paths = [p for p in paths if os.path.lexists(p)]
     moved = {}
-    for start in range(0, len(paths), 500):
-        chunk = paths[start:start + 500]
-        for p in chunk:
-            landed = objc_trash(p)  # the system's own "Move to Trash", reporting where it went
-            if landed:
-                moved[p] = landed
-        if any(os.path.lexists(p) and p not in moved for p in chunk):
-            remaining = [p for p in chunk if os.path.lexists(p) and p not in moved]
-            if remaining and (label or moved_out is not None) and not any(os.path.islink(p) for p in remaining):
-                # Undo needs to know where things went: Finder reports it (the JXA method can't)
-                moved.update(_finder_trash(remaining))
-                remaining = [p for p in remaining if os.path.lexists(p)]
-            if remaining:
-                subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", TRASH_JXA] + remaining, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    # Whatever still exists wasn't moved, whatever the script reported.
+    for p in paths:
+        landed = objc_trash(p)  # the system's own "Move to Trash", reporting where it went
+        if landed:
+            moved[p] = landed
     failed = [p for p in paths if os.path.lexists(p)]
     # Finder resolves symlinks, so it would trash the link's target: never send it links.
     # (Finder's delete of items on network/FAT volumes may skip the Trash: never there either.)
     via_finder = [p for p in failed if not os.path.islink(p) and not p.startswith("/Volumes/")]
     if finder_fallback and via_finder:
-        moved.update(_finder_trash(via_finder))
+        for start in range(0, len(via_finder), 500):
+            moved.update(_finder_trash(via_finder[start:start + 500]))
+        failed = [p for p in failed if os.path.lexists(p)]
+    if failed and not _objc_available():
+        # Without the Objective-C bridge, move them without learning where they went
+        subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", TRASH_JXA] + failed, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         failed = [p for p in failed if os.path.lexists(p)]
     moved = {k: v for k, v in moved.items() if not os.path.lexists(k)}
     if moved_out is not None:

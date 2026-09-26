@@ -931,9 +931,11 @@ def cmd_uninstall(query):
             opened = "Opened " + time_since(used)
         elif app["path"] in last_used:
             opened = "No recorded use"
-        else:
+        elif app["mtime"] > 946684800:  # some apps ship with a 1970 date, which says nothing
             opened = "Modified " + time_since(app["mtime"])
-        sub = ([format_bytes(size)] if size else []) + [opened, "↩ Review · ⌥↩ Uninstall"]
+        else:
+            opened = None
+        sub = ([format_bytes(size)] if size else []) + ([opened] if opened else []) + ["↩ Review · ⌥↩ Uninstall"]
         items.append(item(
             app["name"], " · ".join(sub), file_icon(app["path"]),
             valid=False, autocomplete="=" + app["path"],
@@ -1488,9 +1490,10 @@ def cmd_updates(query):
     if ups and not query:
         items.append(item(
             "{} Available".format(plural(len(ups), "Update")),
-            "↩ Install {} · checked {}".format(
+            ("↩ Install {} · checked {}".format(
                 ("all " + plural(len(installable), "update") + " Burrow can install") if len(installable) > 1
-                else ("the one Burrow can install" if installable else "none automatically"), checked_ago),
+                else "the one Burrow can install", checked_ago) if installable
+             else "Install {} from the rows below · checked {}".format("it" if len(ups) == 1 else "them", checked_ago)),
             icon("update"),
             act("update_install", "", paths=[u["path"] for u in installable]) if installable else None,
             valid=bool(installable),
@@ -1911,6 +1914,8 @@ def retire_legacy_helpers():
         os.remove(LEGACY_AGENT)
     except OSError:
         pass
+    subprocess.run(["/bin/launchctl", "bootout", "gui/{}/io.github.burrow-alfred.menubar".format(os.getuid())],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for line in engine.sh(["/bin/ps", "-Axo", "pid=,comm="]).splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) == 2 and parts[0].isdigit() and parts[1].endswith(("/bin/BurrowMenu", "/bin/BurrowWindow")):
@@ -1924,7 +1929,7 @@ def cmd_menubar(query):
     if not companion_path():
         emit([
             item("Get Burrow Companion (Optional)",
-                 "↩ Download page · a separate app for the health score in the menu bar and the Updates and Browsers windows",
+                 "↩ Download page · menu bar health score, Updates and Browsers windows",
                  icon("menubar"), act("open", COMPANION_URL), mods={"cmd": mod("⌘ Copy the download link", act("copy", COMPANION_URL))}),
             item("Everything Else Works Without It", "Status, updates and browser cleaning are all available in Alfred", icon("check"), valid=False),
         ])

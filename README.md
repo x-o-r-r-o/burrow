@@ -15,6 +15,7 @@ Optional tools, which Burrow uses when they're installed:
 
 See every command via the `burrow` keyword. Every keyword can be changed in the [Workflow’s Configuration](https://www.alfredapp.com/help/workflows/user-configuration/).
 
+![Burrow's commands in Alfred](images/about/hub.png)
 
 Nothing Burrow removes is deleted outright: it all goes to the Trash. **Undo** in `burrow` puts back the last thing Burrow moved to the Trash, and the one before that. **Empty Trash** frees the space when you're ready.
 
@@ -34,6 +35,8 @@ Actions on everything (Clean All, Purge All, Keep Newest of Each…) are on the 
 
 See the health score, CPU, GPU, temperatures, fans, memory, disks, battery, power, network and top processes via the `bustatus` keyword. It refreshes while open.
 
+![System Status](images/about/status.png)
+
 
 ### Clean System
 
@@ -42,6 +45,8 @@ Find app, browser, developer and system caches, logs, crash reports and old temp
 * Caches of apps that are open are skipped. Burrow lists them; quit them and rescan to include them.
 * Anything owned by macOS, plus Mail, Messages and Safari data, is left alone.
 * Optional items (iPhone update files, device backups, Xcode archives) are listed but never included in **Clean All**.
+
+![Clean System](images/about/clean.png)
 
 
 ### Uninstall App
@@ -60,6 +65,8 @@ A complete uninstall removes:
 * Homebrew's record of the app, when it came from `brew install --cask`.
 
 System-owned items need your password, which macOS asks for once. The whole uninstall is one Undo step. Apps with system extensions (VPNs, firewalls, antivirus) are flagged: macOS only removes those in **System Settings → Login Items & Extensions** or with the developer's uninstaller.
+
+![Reviewing an app before uninstalling it](images/about/uninstall.png)
 
 
 ### App Updates
@@ -81,7 +88,9 @@ Before installing, Burrow checks the download is served over HTTPS, is the same 
 * <kbd>⌥</kbd><kbd>↩</kbd> Skip this version.
 * <kbd>⌃</kbd><kbd>↩</kbd> Never check this app.
 
-Apps with their own updaters (Microsoft, Google Chrome, Adobe, JetBrains, Setapp) are left to them. Set **Automatic Update Checks** in the Workflow’s Configuration to get a daily notification, or to install verified updates for apps that aren't open.
+Apps with their own updaters (Microsoft, Google Chrome, Adobe, JetBrains, Setapp) are left to them. Set **Automatic Update Checks** in the Workflow’s Configuration to get a daily notification, or to also install verified updates for apps that aren't open (App Store and Homebrew updates are only notified).
+
+![App Updates](images/about/updates.png)
 
 
 ### Browsers
@@ -107,6 +116,8 @@ The browser is quit first, if you agree. Databases that are only partly cleaned 
 
 Safari's data is protected by macOS. To clean it, give Alfred **Full Disk Access** in **System Settings → Privacy & Security**.
 
+![Browsers](images/about/browsers.png)
+
 
 ### More Commands
 
@@ -127,6 +138,10 @@ Open any command from other apps and scripts with `alfred://runtrigger/io.github
 Burrow Companion is a separate app that shows the health score in the menu bar, and opens App Updates and Browsers in a window with switches, progress bars and release notes. Burrow works fully without it.
 
 Download `Burrow-Companion.zip` from the [latest release](https://github.com/x-o-r-r-o/burrow/releases/latest) and move the app to Applications. It isn't notarized by Apple, so the first time, open it, then click **Open Anyway** in **System Settings → Privacy & Security**.
+
+![Burrow Companion's Updates window](images/about/companion-updates.png)
+
+![Burrow Companion's Browsers window](images/about/companion-browsers.png)
 
 ## Privacy
 

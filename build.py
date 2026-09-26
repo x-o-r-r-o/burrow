@@ -357,6 +357,8 @@ def main():
     os.chmod(os.path.join(BUILD, "run.sh"), 0o755)
     shutil.copytree(os.path.join(SRC, "icons"), os.path.join(BUILD, "icons"), ignore=shutil.ignore_patterns(".*", "__pycache__"))
     shutil.copy(os.path.join(SRC, "icon.png"), os.path.join(BUILD, "icon.png"))
+    # Screenshots the README shows (Alfred displays them in the workflow's About panel)
+    shutil.copytree(os.path.join(ROOT, "images"), os.path.join(BUILD, "images"), ignore=shutil.ignore_patterns(".*"))
 
     icon_for = {}
     info = build_plist(icon_for)

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.1
+
+- **Icons:** Undo, Startup Items, Info, Check, Warning, Error and Download icons show their symbol again, instead of a plain shape.
+- **Trash:** when macOS can't move an item, Burrow only asks Finder to try when that's safe. It never does for items on external or network volumes, where Finder may delete instead of moving to the Trash.
+- **Automatic update checks** that are turned off now remove their login item reliably, and the old menu bar helper's login item is fully unloaded.
+- **Uninstall:** apps with a 1970 file date no longer show “Modified 46 years ago”.
+- **App Updates:** clearer summary when updates have to be installed from the App Store.
+- **README:** screenshots, and a note that App Store and Homebrew updates are never installed automatically.
+
 ## 1.2.0
 
 Ready for the Alfred Gallery.

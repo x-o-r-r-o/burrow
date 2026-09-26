@@ -72,8 +72,11 @@ func render(symbol: String, color: NSColor, to path: String) {
         FileHandle.standardError.write("missing symbol: \(symbol)\n".data(using: .utf8)!)
         exit(1)
     }
+    // Symbols drawn on a shape (arrow.down.circle.fill…) need a second color for the
+    // mark itself; with one color it disappears into the shape.
+    let enclosed = [".circle.fill", ".triangle.fill", ".octagon.fill"].contains { symbol.hasSuffix($0) } && symbol != "circle.fill"
     let config = NSImage.SymbolConfiguration(pointSize: 96, weight: .regular)
-        .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+        .applying(NSImage.SymbolConfiguration(paletteColors: enclosed ? [.white, color] : [color]))
     let image = base.withSymbolConfiguration(config)!
 
     let rep = NSBitmapImageRep(

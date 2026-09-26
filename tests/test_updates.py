@@ -53,11 +53,27 @@ class SourcesTest(unittest.TestCase):
             updates.fetch = real
 
     def test_catalog_only_trusts_similar_version_shapes(self):
-        index = {"App.app": {"token": "app", "version": "2.1.0,4567", "url": "https://example.com/a.dmg", "sha256": "ab"}}
-        app = {"path": "/Applications/App.app", "version": "2.0.1", "build": "400"}
+        index = {"App.app": {"token": "app", "version": "2.1.0,4567", "url": "https://example.com/a.dmg", "sha256": "ab", "bids": ["com.example.app"]}}
+        app = {"path": "/Applications/App.app", "version": "2.0.1", "build": "400", "bundle_id": "com.example.app"}
         self.assertEqual(updates.check_catalog(app, index)["version"], "2.1.0")
         index["App.app"]["version"] = "4567"  # build-number-only cask versions are ignored
         self.assertIsNone(updates.check_catalog(app, index))
+
+    def test_catalog_needs_matching_bundle_id(self):
+        # "Helium.app" in the catalog is a different app than the Helium browser
+        index = {"Helium.app": {"token": "helium", "version": "1.0.0", "url": "https://x/h.dmg", "bids": ["com.koushikdutta.helium"]}}
+        app = {"path": "/Applications/Helium.app", "version": "0.18.1", "build": "1", "bundle_id": "net.imput.helium"}
+        self.assertIsNone(updates.check_catalog(app, index))
+        index["Helium.app"]["bids"] = ["net.imput.helium"]
+        self.assertEqual(updates.check_catalog(app, index)["version"], "1.0.0")
+
+    def test_self_update_never_waits_for_network_offline(self):
+        real = updates.fetch_json
+        updates.fetch_json = lambda *a, **k: (_ for _ in ()).throw(AssertionError("network used"))
+        try:
+            self.assertIsNone(updates.check_self(network=False))
+        finally:
+            updates.fetch_json = real
 
     def test_pick_asset_prefers_native_arch(self):
         assets = [("App-1.0-x64.zip", "u-x64"), ("App-1.0-arm64.zip", "u-arm"), ("App-1.0-universal.dmg", "u-uni"), ("App-1.0.zip.blockmap", "b")]

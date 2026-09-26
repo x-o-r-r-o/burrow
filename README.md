@@ -91,8 +91,10 @@ Pick a browser, switch on what to clean, and choose a time range (last hour, day
 
 To reset a browser:
 
-- **Reset settings** restores its defaults and moves extensions to the Trash with the old settings, so Undo brings both back. Bookmarks, history and passwords stay.
-- **Full reset** moves the whole profile to the Trash, as if the browser had just been installed.
+- **Reset settings** restores its defaults. Bookmarks, history and passwords stay.
+  - **Chromium browsers:** extensions *and their stored data* (a wallet or password-manager extension's local vault, for example) move to the Trash with the old settings. Undo brings them back.
+  - **Firefox browsers:** extensions stay.
+- **Full reset** moves everything to the Trash, as if the browser had just been installed, including bookmarks and passwords. It covers the chosen profile, or all profiles if you haven't picked one.
 
 **How it keeps your data safe:**
 
@@ -100,6 +102,14 @@ To reset a browser:
 - Files go to the Trash.
 - Databases that are only partly cleaned get a backup in the Trash first. Undo restores them.
 - If you use sync, anything you delete may come back from your account.
+
+Cache and open tabs are always cleared completely; the time range applies to the other categories.
+
+Keys in `bubrowsers`:
+- On a browser row: **↩** choose what to clean, **⌥↩** clean now with your saved choices, **⌘↩** reveal its data folder, **⌃↩** copy the folder's path.
+- Inside a browser: **↩** turns a category on or off, and on **Time Range**, **⌥↩** goes back one step.
+
+**Clear the Cache of Every Closed Browser** clears every closed browser's cache as one Undo step. Choices you make in Alfred and in the window are shared.
 
 **Safari:** macOS protects Safari's data, so Alfred needs **Full Disk Access** (System Settings → Privacy & Security → Full Disk Access). Burrow shows a button that opens that page. Safari keeps passwords and form data in the Passwords app, so Burrow leaves those alone.
 
@@ -111,7 +121,7 @@ To reset a browser:
 
 | Source | Which apps | How the update is installed |
 |---|---|---|
-| **Mac App Store** | Apps from the App Store | Opens the app's page in the App Store (only Apple can install these) |
+| **Mac App Store** | Apps from the App Store | Updated from Burrow with [mas](https://github.com/mas-cli/mas), with one password prompt. Burrow installs mas for you with Homebrew when you click **Install mas**. Without it, and for iPhone/iPad apps, the App Store opens instead |
 | **Homebrew** | Apps you installed with `brew install --cask` | `brew upgrade --cask` |
 | **Sparkle** | Apps with a built-in "Check for Updates…" (a Sparkle feed) | Burrow downloads and installs it |
 | **Electron** | Apps using electron-updater (GitHub releases or a feed) | Burrow downloads and installs it |
@@ -131,7 +141,7 @@ Keys: ↩ update · ⌘↩ release notes · ⌥↩ skip this version · ⌃↩ n
 
 **Automatic checks** (Configure Workflow → Automatic Update Checks) run once a day:
 - **Notify me** (the default) tells you what's new.
-- **Install automatically** also installs verified updates for apps that aren't open.
+- **Install automatically** also installs verified updates for apps that aren't open. It skips App Store and Homebrew updates: those need a password or Homebrew, and macOS's own App Store updates cover App Store apps.
 - **Off** turns daily checks off.
 
 Apps with their own updaters (Microsoft, Google Chrome, Adobe, JetBrains, Setapp) are left to them.
@@ -163,6 +173,7 @@ Open the workflow in Alfred Preferences and click **Configure Workflow…**:
 
 ## Good to know
 
+- **Offline:** update checks use the last results, and `bu` never waits for the network while you type.
 - Scans run in the background and results fill in as they're found. Results are reused for 10 minutes (Analyze: 15), so reopening is instant. Use **Rescan** for fresh results.
 - The first **Empty Trash** asks you to let Alfred control Finder.
 - Temperatures and fan speeds come straight from the Mac's hardware sensor chip (the SMC), without admin rights.

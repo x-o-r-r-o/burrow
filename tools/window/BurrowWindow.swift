@@ -80,6 +80,7 @@ final class UpdatesModel: ObservableObject {
     @Published var hasMas = true
     @Published var hasBrew = false
     @Published var installingMas = false
+    @Published var loadedOnce = false
 
     func load(check: Bool = false) {
         loading = true
@@ -98,8 +99,14 @@ final class UpdatesModel: ObservableObject {
             self.history = (o["history"] as? [[String: Any]] ?? []).map { (id: $0["id"] as? String ?? "", label: $0["label"] as? String ?? "", time: $0["time"] as? Double ?? 0) }
             self.selfUpdate = (o["self"] as? [String: Any])?["version"] as? String
             self.hasMas = o["mas"] as? Bool ?? true
+            if let e = o["error"] as? String { self.message = e }
             self.hasBrew = o["brew"] as? Bool ?? false
-        }, done: { self.loading = false })
+        }, done: {
+            self.loading = false
+            let first = !self.loadedOnce
+            self.loadedOnce = true
+            if first && self.checked == nil && !check { self.load(check: true) }  // never checked: check now
+        })
     }
 
     func install(_ items: [AppUpdate]) {
@@ -113,7 +120,12 @@ final class UpdatesModel: ObservableObject {
         }, done: { self.load() })
     }
 
-    func simple(_ args: [String]) { runCLI("updates.py", args, onLine: { _ in }, done: { self.load() }) }
+    func simple(_ args: [String]) {
+        runCLI("updates.py", args, onLine: { o in
+            if let e = o["error"] as? String { self.message = e }
+            else if let d = o["done"] as? String { self.message = d }
+        }, done: { self.load() })
+    }
 
     func installMas() {
         installingMas = true
@@ -180,8 +192,12 @@ struct UpdatesView: View {
                     if !store.isEmpty {
                         Section("Update elsewhere · \(store.count)") { ForEach(store) { row($0).tag($0.id) } }
                     }
-                    if model.updates.isEmpty && !model.loading {
+                    if model.updates.isEmpty && !model.loading && model.checked != nil {
                         Label("Everything's up to date", systemImage: "checkmark.circle").foregroundStyle(.secondary)
+                    }
+                    if model.loading && model.updates.isEmpty {
+                        HStack { ProgressView().controlSize(.small).accessibilityLabel("Checking"); Text("Checking your apps for updates…") }
+                            .foregroundStyle(.secondary)
                     }
                     Section("Up to date · \(model.current)  ·  No update source · \(model.unknown)") { EmptyView() }
                     if !model.ignored.isEmpty {
@@ -191,7 +207,7 @@ struct UpdatesView: View {
                                     Text(item.0).lineLimit(1)
                                     Spacer()
                                     Text(item.1 == "*" ? "always" : "v" + item.1).foregroundStyle(.secondary)
-                                    Button("Show again") { model.simple(["unignore", item.0]) }.buttonStyle(.link)
+                                    Button("Show again") { model.simple(["unignore", item.0]) }.buttonStyle(.link).accessibilityLabel("Show \(item.0) again")
                                 }
                             }
                         }
@@ -204,7 +220,7 @@ struct UpdatesView: View {
             Divider()
             footer
         }
-        .alert("Install \(installable.count) updates?", isPresented: $ui.confirmAll) {
+        .alert(installable.count == 1 ? "Install 1 update?" : "Install \(installable.count) updates?", isPresented: $ui.confirmAll) {
             Button("Install") { model.install(installable) }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -218,7 +234,7 @@ struct UpdatesView: View {
 
     func row(_ u: AppUpdate) -> some View {
         HStack(spacing: 10) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: u.id)).resizable().frame(width: 28, height: 28)
+            Image(nsImage: NSWorkspace.shared.icon(forFile: u.id)).resizable().frame(width: 28, height: 28).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(u.name).fontWeight(.medium)
                 Text("\(u.installed) → \(u.version) · \(u.source)").font(.caption).foregroundStyle(.secondary)
@@ -230,9 +246,9 @@ struct UpdatesView: View {
             } else if let p = model.progress[u.id], !p.hasPrefix("Not") {
                 ProgressView().controlSize(.small)
             } else if u.installable {
-                Button("Update") { model.install([u]) }
+                Button("Update") { model.install([u]) }.accessibilityLabel("Update \(u.name)")
             } else if let url = u.url, let link = URL(string: url) {
-                Button("Open") { NSWorkspace.shared.open(link) }
+                Button("Open") { NSWorkspace.shared.open(link) }.accessibilityLabel("Open \(u.name) in the App Store")
             }
         }.padding(.vertical, 2)
     }
@@ -260,7 +276,7 @@ struct UpdatesView: View {
                         Link("Release notes and website", destination: link)
                     }
                     HStack {
-                        if u.installable { Button("Update") { model.install([u]) }.keyboardShortcut(.defaultAction) }
+                        if u.installable { Button("Update \(u.name)") { model.install([u]) } }
                         else if let url = u.url, let link = URL(string: url) { Button("Open in App Store") { NSWorkspace.shared.open(link) } }
                         Button("Skip \(u.version)") { model.simple(["skip", u.bundleId, u.version]) }
                         Button("Ignore app") { model.simple(["ignore", u.bundleId]) }
@@ -319,9 +335,18 @@ final class BrowsersModel: ObservableObject {
     @Published var profile: [String: String] = [:]
     @Published var busy: String?
     @Published var message: String?
+    @Published var loaded = false
+    @Published var notes: [String: [String]] = [:]
 
     func load() {
         runCLI("browsers.py", ["state"], onLine: { o in
+            self.loaded = true
+            let saved = o["choices"] as? [String: [String: Any]] ?? [:]
+            for (id, c) in saved {
+                if let cats = c["categories"] as? [String] { self.chosen[id] = Set(cats) }
+                if let r = c["range"] as? String { self.range[id] = r }
+                if let p = c["profile"] as? String { self.profile[id] = p }
+            }
             self.browsers = (o["browsers"] as? [[String: Any]] ?? []).map { b in
                 BrowserInfo(id: b["id"] as? String ?? "", name: b["name"] as? String ?? "", kind: b["kind"] as? String ?? "",
                             app: b["app"] as? String, installed: b["installed"] as? Bool ?? false, running: b["running"] as? Bool ?? false,
@@ -335,6 +360,18 @@ final class BrowsersModel: ObservableObject {
     }
 
     func profilesArg(_ b: BrowserInfo) -> String { (profile[b.id] ?? "all") == "all" ? "" : (profile[b.id] ?? "") }
+
+    /// Save the choices (shared with Alfred's bubrowsers) and refresh the notes for them.
+    func choicesChanged(_ b: BrowserInfo) {
+        let cats = Array(chosen[b.id] ?? []).sorted()
+        let change: [String: Any] = ["categories": cats, "range": range[b.id] ?? "all", "profile": profile[b.id] ?? "all"]
+        if let data = try? JSONSerialization.data(withJSONObject: change), let json = String(data: data, encoding: .utf8) {
+            runCLI("browsers.py", ["choose", b.id, json], onLine: { _ in })
+        }
+        runCLI("browsers.py", ["plan", b.id, cats.joined(separator: ","), range[b.id] ?? "all", profilesArg(b)], onLine: { o in
+            self.notes[b.id] = o["notes"] as? [String] ?? (o["error"] as? String).map { [$0] } ?? []
+        })
+    }
 
     func clean(_ b: BrowserInfo) {
         busy = b.id
@@ -388,6 +425,9 @@ struct BrowsersView: View {
         .onReceive(model.$browsers) { list in
             if ui.selection == nil || !list.contains(where: { $0.id == ui.selection }) { ui.selection = list.first?.id }
         }
+        .onChange(of: ui.selection) { id in
+            if let b = model.browsers.first(where: { $0.id == id }) { model.choicesChanged(b) }
+        }
     }
 
     @ViewBuilder var detail: some View {
@@ -396,7 +436,8 @@ struct BrowsersView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "lock.shield").font(.largeTitle)
                     Text("Safari's data is protected by macOS").font(.headline)
-                    Text("Give Alfred Full Disk Access to clean Safari.").foregroundStyle(.secondary)
+                    Text("Give Alfred Full Disk Access to clean Safari (and BurrowWindow too if you opened this window from the menu bar).")
+                        .foregroundStyle(.secondary).multilineTextAlignment(.center)
                     Button("Open Privacy settings") {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
                     }
@@ -407,19 +448,27 @@ struct BrowsersView: View {
                         ForEach(model.categories, id: \.key) { c in
                             Toggle(isOn: Binding(
                                 get: { model.chosen[b.id, default: []].contains(c.key) },
-                                set: { on in if on { model.chosen[b.id, default: []].insert(c.key) } else { model.chosen[b.id, default: []].remove(c.key) } })) {
+                                set: { on in
+                                    if on { model.chosen[b.id, default: []].insert(c.key) } else { model.chosen[b.id, default: []].remove(c.key) }
+                                    model.choicesChanged(b)
+                                })) {
                                 VStack(alignment: .leading) { Text(c.label); Text(c.detail).font(.caption).foregroundStyle(.secondary) }
                             }
                         }
-                        Picker("Time range", selection: Binding(get: { model.range[b.id] ?? "all" }, set: { model.range[b.id] = $0 })) {
+                        Picker("Time range", selection: Binding(get: { model.range[b.id] ?? "all" }, set: { model.range[b.id] = $0; model.choicesChanged(b) })) {
                             ForEach(model.ranges, id: \.key) { Text($0.label).tag($0.key) }
                         }
                         if b.profiles.count > 1 {
-                            Picker("Profiles", selection: Binding(get: { model.profile[b.id] ?? "all" }, set: { model.profile[b.id] = $0 })) {
+                            Picker("Profiles", selection: Binding(get: { model.profile[b.id] ?? "all" }, set: { model.profile[b.id] = $0; model.choicesChanged(b) })) {
                                 Text("All profiles").tag("all")
                                 ForEach(b.profiles, id: \.id) { Text($0.name).tag($0.id) }
                             }
                         }
+                        ForEach(model.notes[b.id] ?? [], id: \.self) { n in
+                            Label(n, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text("Cache and open tabs are always cleared completely; the time range applies to the rest.")
+                            .font(.caption).foregroundStyle(.secondary)
                         HStack {
                             if b.running { Label("\(b.name) will be quit first", systemImage: "exclamationmark.triangle").font(.caption) }
                             Spacer()
@@ -433,7 +482,11 @@ struct BrowsersView: View {
                         Section("Reset") {
                             if b.kind != "orion" {
                                 HStack {
-                                    VStack(alignment: .leading) { Text("Reset settings"); Text("Defaults; extensions go to the Trash too. Bookmarks, history and passwords stay.").font(.caption).foregroundStyle(.secondary) }
+                                    VStack(alignment: .leading) {
+                                        Text("Reset settings")
+                                        Text(b.kind == "chromium" ? "Defaults. Extensions and their stored data go to the Trash too (Undo brings them back). Bookmarks, history and passwords stay."
+                                                                  : "Defaults. Extensions, bookmarks, history and passwords stay.").font(.caption).foregroundStyle(.secondary)
+                                    }
                                     Spacer()
                                     Button("Reset settings") { ui.confirm = "reset" }.disabled(model.busy != nil)
                                 }
@@ -457,7 +510,7 @@ struct BrowsersView: View {
                 } message: { Text(alertMessage(b)) }
             }
         } else {
-            Text(model.browsers.isEmpty ? "No browsers found" : "Select a browser").foregroundStyle(.secondary)
+            Text(!model.loaded ? "Finding browsers…" : (model.browsers.isEmpty ? "No browsers found" : "Select a browser")).foregroundStyle(.secondary)
         }
     }
 
@@ -477,7 +530,9 @@ struct BrowsersView: View {
             let n = b.profiles.count
             let which = n > 1 && (model.profile[b.id] ?? "all") == "all" ? "All \(n) profiles of \(b.name)" : "The profile"
             return "\(which): bookmarks, history, passwords, extensions, cookies and settings all go to the Trash. You can undo this in Alfred with bu."
-        case "reset": return "Settings go back to their defaults and extensions move to the Trash with them (Undo brings both back). Bookmarks, history and passwords stay."
+        case "reset": return b.kind == "chromium"
+            ? "Settings go back to their defaults. Extensions and their stored data (for example a wallet or password-manager extension's local vault) move to the Trash; Undo brings them back. Bookmarks, history and passwords stay."
+            : "Settings go back to their defaults. Extensions, bookmarks, history and passwords stay."
         default: return "Everything goes to the Trash first, so you can undo it in Alfred with bu."
         }
     }
@@ -531,6 +586,8 @@ struct RootView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(ui.section == key ? .isSelected : [])
+        .accessibilityLabel(count > 0 ? "\(title), \(count) available" : title)
     }
 }
 
@@ -578,8 +635,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
 }
 
+func buildMainMenu() {
+    let main = NSMenu()
+    let appItem = NSMenuItem(); main.addItem(appItem)
+    let appMenu = NSMenu()
+    appMenu.addItem(withTitle: "Quit Burrow", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appItem.submenu = appMenu
+    let fileItem = NSMenuItem(); main.addItem(fileItem)
+    let fileMenu = NSMenu(title: "File")
+    fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    fileItem.submenu = fileMenu
+    let editItem = NSMenuItem(); main.addItem(editItem)
+    let edit = NSMenu(title: "Edit")
+    edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+    edit.addItem(.separator())
+    edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editItem.submenu = edit
+    NSApp.mainMenu = main
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
+buildMainMenu()
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

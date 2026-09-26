@@ -394,6 +394,38 @@ class StateTest(unittest.TestCase):
             p.wait()
         self.assertEqual(engine.load_state("count.json")["n"], 100)
 
+    def test_cached_serves_last_value_when_offline(self):
+        engine.cached("net", 0, lambda: {"v": 1})
+        def offline():
+            raise OSError("no network")
+        self.assertEqual(engine.cached("net", 0, offline), {"v": 1})
+
+    def test_update_rollbacks_outlive_unrelated_history(self):
+        engine.record_trash_batch("Update Foo to 2", {"/Applications/Foo.app": "/t/Foo.app"}, "u1")
+        engine.update_state(engine.TRASH_HISTORY, lambda d: {"batches": [dict(b, items=[dict(i, replace=True) for i in b["items"]]) for b in d["batches"]]})
+        for i in range(30):
+            engine.record_trash_batch("clean {}".format(i), {"/x/{}".format(i): "/t/{}".format(i)})
+        labels = [b["label"] for b in engine.load_state(engine.TRASH_HISTORY)["batches"]]
+        self.assertIn("Update Foo to 2", labels)
+        self.assertEqual(len(labels), engine.TRASH_HISTORY_KEEP + 1)
+
+    def test_undo_keeps_what_could_not_go_back(self):
+        root = tempfile.mkdtemp()
+        src = os.path.join(root, "trashed")
+        open(src, "w").close()
+        engine.record_trash_batch("x", {os.path.join(root, "blocked", "f"): src, os.path.join(root, "gone"): os.path.join(root, "nothing")}, "b1")
+        os.makedirs(os.path.join(root, "blocked"))
+        os.chmod(os.path.join(root, "blocked"), 0o500)  # can't move back into it
+        try:
+            real = engine._move_back
+            engine._move_back = lambda s, d: False
+            engine.undo_trash_batch(engine.find_trash_batch("b1"))
+        finally:
+            engine._move_back = real
+            os.chmod(os.path.join(root, "blocked"), 0o700)
+        left = engine.find_trash_batch("b1")
+        self.assertEqual([i["to"] for i in left["items"]], [src])  # kept to retry; the vanished one is dropped
+
     def test_housekeeping_removes_stale_files_only(self):
         import time
         jobs = os.path.join(engine.CACHE_DIR, "jobs")

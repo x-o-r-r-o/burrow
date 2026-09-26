@@ -309,7 +309,10 @@ def check_homebrew():
         casks = json.loads(out or b"{}").get("casks", [])
     except ValueError:
         return {}
-    index = catalog_index()
+    try:
+        index = catalog_index()
+    except Exception:  # noqa: BLE001 — offline and no catalog yet
+        return {}
     result = {}
     for c in casks:
         for app_name, meta in index.items():
@@ -344,14 +347,21 @@ def catalog_index():
                                 "token": c["token"], "version": version, "url": c.get("url"),
                                 "sha256": c.get("sha256") if c.get("sha256") not in (None, "no_check") else None,
                                 "homepage": c.get("homepage"),
+                                # bundle ids the cask names (quit/zap/uninstall): proves which app it is
+                                "bids": sorted(set(re.findall(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9_-]+){2,}", json.dumps(c.get("artifacts") or []))))[:40],
                             })
         return index
-    return cached("cask-index", 86400, compute)
+    return cached("cask-index-v2", 86400, compute)
 
 
 def check_catalog(app, index):
     meta = index.get(os.path.basename(app["path"]))
     if not meta:
+        return None
+    # Same file name isn't enough ("Helium.app" is two different apps): the cask must
+    # name this app's bundle id somewhere.
+    bid = (app.get("bundle_id") or "").lower()
+    if not bid or not any(b.lower() == bid or b.lower().startswith(bid + ".") for b in meta.get("bids") or []):
         return None
     latest = meta["version"].split(",")[0]
     # Some casks version by build number; only trust versions shaped like the app's
@@ -426,6 +436,7 @@ def check_all():
     result = {"time": time.time(), "updates": updates, "current": len(current), "unknown": unknown,
               "checked": len(apps), "errors": errors}
     save_state(RESULTS, result)
+    check_self()  # refresh Burrow's own update status in the background run
     return result
 
 
@@ -648,17 +659,18 @@ class _AppLock:
         self.fd.close()
 
 
-def install(update, relaunch=True, log=lambda msg: None):
-    """Download, verify and install one update. Returns a message; raises UpdateError."""
+def install(update, relaunch=True, log=lambda msg: None, unattended=False):
+    """Download, verify and install one update. Returns a message; raises UpdateError.
+    unattended (the daily run): never quit an app; skip it if it's open by then."""
     os.makedirs(engine.CACHE_DIR, exist_ok=True)
     lock = _AppLock(update["path"])
     try:
-        return _install(update, relaunch, log)
+        return _install(update, relaunch, log, unattended)
     finally:
         lock.release()
 
 
-def _install(update, relaunch=True, log=lambda msg: None):
+def _install(update, relaunch=True, log=lambda msg: None, unattended=False):
     app = app_info(update["path"])
     if not os.path.exists(app["path"]):
         raise UpdateError("the app is no longer installed")
@@ -678,6 +690,8 @@ def _install(update, relaunch=True, log=lambda msg: None):
     staged, new, cleanup = prepare(update, app, log)
     try:
         was_running = engine.app_is_running(app["path"])
+        if was_running and unattended:
+            raise UpdateError("{} is open, so it'll be updated another time".format(app["name"]))
         if was_running:
             if not engine.quit_app(app["path"], app["bundle_id"]):
                 raise UpdateError("{} didn't quit".format(app["name"]))
@@ -750,8 +764,15 @@ def burrow_version():
         return None
 
 
-def check_self():
-    """The latest Burrow release if it's newer than this one (checked at most every 12 hours)."""
+def check_self(network=True):
+    """The latest Burrow release if it's newer than this one (checked at most every
+    12 hours). network=False only reads the last result (fast; for Script Filters)."""
+    if not network:
+        latest = load_state("memo-self-update.json").get("value") or {}
+        current = burrow_version()
+        if current and latest.get("url") and newer(latest.get("version"), current):
+            return dict(latest, installed=current)
+        return None
     def compute():
         rel = fetch_json("https://api.github.com/repos/{}/releases/latest".format(SELF_REPO))
         assets = {a.get("name"): a.get("browser_download_url") for a in rel.get("assets") or []}
@@ -804,7 +825,10 @@ def sync_agent(mode, script_path):
     want = mode in ("notify", "install")
     wanted = {
         "Label": AGENT_LABEL,
-        "ProgramArguments": ["/usr/bin/python3", script_path, "auto", mode],
+        "ProgramArguments": ["/bin/sh", "-c",
+                             'if [ -f "$0" ]; then exec /usr/bin/python3 "$0" auto "$1"; '
+                             'else /bin/launchctl bootout gui/$(id -u)/{0} 2>/dev/null; rm -f "$HOME/Library/LaunchAgents/{0}.plist"; fi'.format(AGENT_LABEL),
+                             script_path, mode],
         "StartCalendarInterval": {"Hour": 10, "Minute": 30},
         "RunAtLoad": False,
         "ProcessType": "Background",
@@ -860,7 +884,7 @@ def auto(mode):
         for u in ups:
             if u.get("installable") and u["source"] not in ("Homebrew", "App Store") and not engine.app_is_running(u["path"]):
                 try:
-                    install(u, relaunch=False)
+                    install(u, relaunch=False, unattended=True)
                     installed.append(u["name"])
                 except Exception:  # noqa: BLE001
                     failed.append(u["name"])
@@ -892,9 +916,10 @@ def window_state(check=False):
         "updates": [dict(u, size=None) for u in ups],
         "ignored": [{"bundle_id": k, "rule": v} for k, v in sorted(ignore.items())],
         "history": history(),
-        "self": check_self(),
+        "self": check_self(network=False),
         "mas": bool(mas_path()), "brew": bool(brew_path()),
         "mode": os.environ.get("auto_updates") or _alfred_setting("auto_updates") or "notify",
+        "failure": result.get("failure"),
     }
 
 
@@ -909,11 +934,28 @@ def _alfred_setting(name):
 
 def cli(argv):
     """JSON commands for the updater window. Progress is printed as JSON lines."""
+    import sys
+    closed = []
+
     def say(obj):
-        print(json.dumps(obj), flush=True)
+        if closed:
+            return
+        try:
+            print(json.dumps(obj), flush=True)
+        except BrokenPipeError:
+            closed.append(True)  # the window went away: keep working, stop reporting
+            try:
+                sys.stdout = open(os.devnull, "w")
+            except OSError:
+                pass
     cmd = argv[0] if argv else ""
     if cmd == "state":
-        say(window_state(check="--check" in argv))
+        try:
+            say(window_state(check="--check" in argv))
+        except Exception as e:  # noqa: BLE001
+            state = window_state()
+            state["error"] = "The check failed: {}".format(e)
+            say(state)
     elif cmd == "install-mas":
         try:
             say({"done": install_mas()})
@@ -957,9 +999,15 @@ def cli(argv):
         batch = next((b for b in load_state(engine.TRASH_HISTORY).get("batches", []) if b.get("id") == argv[1]), None)
         if not batch:
             say({"error": "that update can't be rolled back any more"})
+        elif engine.batch_running_apps(batch) and "--quit" not in argv:
+            say({"error": "{} is open. Quit it first".format(os.path.basename(engine.batch_running_apps(batch)[0])[:-4]), "running": True})
         else:
+            for app in engine.batch_running_apps(batch):
+                engine.quit_app(app, app_info(app)["bundle_id"])
             restored, skipped = engine.undo_trash_batch(batch)
-            say({"ok": not skipped, "restored": len(restored), "skipped": len(skipped)})
+            say({"ok": not skipped, "restored": len(restored), "skipped": len(skipped),
+                 "done": "Rolled back" if restored and not skipped else None,
+                 "error": None if not skipped else "{} couldn't be put back".format(len(skipped))})
     elif cmd == "self-update":
         up = check_self()
         if not up:

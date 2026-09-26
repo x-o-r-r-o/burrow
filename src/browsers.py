@@ -30,6 +30,8 @@ import engine
 from engine import HOME, _listdir, _normalize, dir_size
 
 SUPPORT = os.path.join(HOME, "Library", "Application Support")
+# Current macOS runs Safari from here; /Applications/Safari.app is a stub
+SAFARI_CRYPTEX = "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app"
 CACHES = os.path.join(HOME, "Library", "Caches")
 
 CATEGORIES = [
@@ -162,7 +164,25 @@ def firefox_profiles(root):
 
 
 def discover():
-    """Every browser with data on this Mac (installed or left behind)."""
+    """Every browser with data on this Mac, cached for a minute (and refreshed when
+    apps or browser data folders change)."""
+    key = "{}-{}".format(int(_mtime("/Applications")), int(_mtime(SUPPORT)))
+    memo = engine.load_state("memo-browsers.json")
+    if memo.get("key") == key and time.time() - memo.get("time", 0) < 60:
+        return memo["value"]
+    value = _discover()
+    engine.save_state("memo-browsers.json", {"key": key, "time": time.time(), "value": value})
+    return value
+
+
+def _mtime(path):
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return 0
+
+
+def _discover():
     apps = browser_apps()
     browsers = []
     for kind, marker in (("chromium", "Local State"), ("firefox", "profiles.ini")):
@@ -186,6 +206,7 @@ def discover():
     if "safari" in apps:
         browsers.append({"id": "safari", "kind": "safari", "name": "Safari", "root": os.path.join(HOME, "Library", "Safari"),
                          "app": apps["safari"]["path"], "bundle_id": "com.apple.Safari", "installed": True,
+                         "also_apps": [SAFARI_CRYPTEX],
                          "profiles": [{"id": "default", "name": "Safari"}], "access": safari_access()})
     orion = os.path.join(SUPPORT, "Orion")
     if os.path.isdir(orion):
@@ -206,14 +227,15 @@ def safari_access():
         return False
 
 
-def is_running(browser):
-    """Open right now: by bundle id (Safari runs from /System/Cryptexes…), by app path,
-    and for every app that shares the data folder (Firefox Developer Edition…)."""
+def is_running(browser, executables=None):
+    """Open right now, by app path (including Safari's system location and every app
+    sharing the data folder, like Firefox Developer Edition). Only when there's no
+    app path to check is macOS asked by bundle id (slower)."""
     paths = [p for p in [browser.get("app")] + browser.get("also_apps", []) if p]
-    executables = engine.running_executables()
-    if any(engine.app_is_running(p, executables) for p in paths):
-        return True
-    ids = [browser.get("bundle_id")] + [bundle_id_of(p) for p in browser.get("also_apps", [])]
+    executables = executables if executables is not None else engine.running_executables()
+    if paths:
+        return any(engine.app_is_running(p, executables) for p in paths)
+    ids = [browser.get("bundle_id")]
     for bid in [i for i in ids if i]:
         out = subprocess.run(["/usr/bin/osascript", "-e", "on run argv", "-e", "return application id (item 1 of argv) is running", "-e", "end run", bid],
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10).stdout.decode().strip()
@@ -399,15 +421,16 @@ def plan(browser, profile_ids, categories, range_key):
             if "forms" in categories or "passwords" in categories:
                 notes.append("Safari keeps form data and passwords in your Keychain; manage them in the Passwords app")
         elif browser["kind"] == "orion":
+            obid = browser.get("bundle_id") or "com.kagi.kagimacOS"
             if "cache" in categories:
-                exist(os.path.join(CACHES, "com.kagi.kagimacOS"))
+                exist(os.path.join(CACHES, obid))
             if "history" in categories:
                 h = os.path.join(browser["root"], "Defaults", "history")
                 exist(h, h + "-wal", h + "-shm")
                 if since:
                     notes.append("Orion's history can only be cleared for all time")
             if "cookies" in categories:
-                exist(os.path.join(HOME, "Library", "HTTPStorages", "com.kagi.kagimacOS"), os.path.join(HOME, "Library", "WebKit", "com.kagi.kagimacOS"))
+                exist(os.path.join(HOME, "Library", "HTTPStorages", obid), os.path.join(HOME, "Library", "WebKit", obid))
             if {"downloads", "sessions", "forms", "passwords"} & set(categories):
                 notes.append("Orion supports cache, history and cookies here; use Orion's settings for the rest")
     return {"trash": sorted(set(trash)), "sql": sql, "notes": sorted(set(notes))}
@@ -431,7 +454,7 @@ def reset_plan(browser, profile_ids, full):
             else:
                 trash += [os.path.join(prof["id"], n) for n in ("prefs.js", "xulstore.json", "extension-preferences.json")]
         elif browser["kind"] == "orion" and full:
-            trash += [browser["root"], os.path.join(CACHES, "com.kagi.kagimacOS")]
+            trash += [browser["root"], os.path.join(CACHES, browser.get("bundle_id") or "com.kagi.kagimacOS")]
         else:
             raise BrowserError("{} can't be reset from Burrow; use its own settings".format(browser["name"]))
     return [p for p in trash if os.path.lexists(p)]
@@ -444,18 +467,19 @@ def reset_plan(browser, profile_ids, full):
 
 def _backup_to_trash(db, label, batch):
     """Put a copy of a database in the Trash first, so Undo can restore it."""
-    try:
-        con = sqlite3.connect(db, timeout=5)
-        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        con.close()
-    except sqlite3.Error:
-        pass
     copy = "{}.burrow-backup-{}".format(db, int(time.time()))
-    shutil.copy2(db, copy)
+    try:
+        src = sqlite3.connect(db, timeout=10)
+        dst = sqlite3.connect(copy)
+        src.backup(dst)  # consistent copy, including what's still in the -wal file
+        dst.close()
+        src.close()
+    except sqlite3.Error as e:
+        if os.path.exists(copy):
+            os.remove(copy)
+        raise BrowserError("couldn't back up {} first ({}), so it wasn't changed".format(os.path.basename(db), e))
     moved = {}
-    engine.trash_paths([copy], finder_fallback=False, moved_out=moved, label="(backup)")
-    # trash_paths recorded a throwaway "(backup)" batch; re-file it under the real one
-    engine.update_state(engine.TRASH_HISTORY, lambda d: {"batches": [b for b in d.get("batches", []) if b.get("label") != "(backup)"]})
+    engine.trash_paths([copy], finder_fallback=False, moved_out=moved)
     if copy not in moved:
         if os.path.exists(copy):
             os.remove(copy)
@@ -494,13 +518,14 @@ def run_sql(db, statements):
         con.close()
 
 
-def clean(browser, profile_ids, categories, range_key, label=None):
-    """Clean the chosen categories. The browser must not be running."""
+def clean(browser, profile_ids, categories, range_key, label=None, batch_id=None):
+    """Clean the chosen categories. The browser must not be running. Pass the same
+    batch_id to make cleaning several browsers one Undo step."""
     if is_running(browser):
         raise BrowserError("{} is open".format(browser["name"]))
     p = plan(browser, profile_ids, categories, range_key)
     label = label or "Clean {} ({})".format(browser["name"], dict((k, l) for k, l, _ in RANGES)[range_key].lower())
-    batch = engine.new_batch_id()
+    batch = batch_id or engine.new_batch_id()
     sizes_before = {x: dir_size(x) for x in p["trash"]}
     failed = engine.trash_paths(p["trash"], finder_fallback=False, label=label, batch_id=batch)
     size = sum(v for k, v in sizes_before.items() if k not in failed)
@@ -525,7 +550,11 @@ def reset(browser, profile_ids, full):
 
 
 def sizes(browser):
-    """Rough sizes for the list: cache and everything else in the profiles."""
+    """Cache size for the list (cached for 5 minutes)."""
+    return engine.cached("browser-size-" + _normalize(browser["id"]), 300, lambda: _sizes(browser))
+
+
+def _sizes(browser):
     cache = 0
     for prof in browser["profiles"]:
         if browser["kind"] == "chromium":
@@ -533,7 +562,7 @@ def sizes(browser):
         elif browser["kind"] == "firefox":
             cache += dir_size(_firefox_cache_root(browser, prof["id"]))
     if browser["kind"] == "orion":
-        cache = dir_size(os.path.join(CACHES, "com.kagi.kagimacOS"))
+        cache = dir_size(os.path.join(CACHES, browser.get("bundle_id") or "com.kagi.kagimacOS"))
     return {"cache": cache}
 
 
@@ -547,7 +576,13 @@ def cli(argv):
         for b in discover():
             items.append(dict(b, running=is_running(b), cache=sizes(b)["cache"]))
         say({"browsers": items, "categories": [{"key": k, "label": l, "ranged": r, "detail": d} for k, l, r, d in CATEGORIES],
-             "ranges": [{"key": k, "label": l} for k, l, _ in RANGES]})
+             "ranges": [{"key": k, "label": l} for k, l, _ in RANGES],
+             "choices": engine.load_state("browser-choices.json")})
+    elif cmd == "choose":
+        # cli choose <browser id> <json {"categories": [...], "range": "...", "profile": "..."}>  (shared with Alfred)
+        change = json.loads(argv[2])
+        engine.update_state("browser-choices.json", lambda d: dict(d, **{argv[1]: dict(d.get(argv[1]) or {}, **change)}))
+        say({"ok": True})
     elif cmd in ("plan", "clean", "reset"):
         # cli clean <browser id> <cat,cat> <range> [profile,profile]
         b = next((x for x in discover() if x["id"] == argv[1]), None)

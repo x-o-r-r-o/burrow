@@ -93,7 +93,18 @@ def cached(name, ttl, compute):
                 return json.load(f)["value"]
     except (OSError, ValueError, KeyError):
         pass
-    value = compute()
+    try:
+        value = compute()
+    except Exception:
+        # Offline or failing: use the last good value rather than failing (or retrying
+        # the network on every keystroke); try again after a short while.
+        try:
+            with open(path) as f:
+                old = json.load(f)["value"]
+            os.utime(path, (time.time(), time.time() - ttl + min(ttl, 1800)))
+            return old
+        except (OSError, ValueError, KeyError):
+            raise
     save_state("memo-" + name + ".json", {"value": value})
     return value
 
@@ -380,7 +391,7 @@ def trash_paths(paths, finder_fallback=True, label=None, batch_id=None, moved_ou
                 pass  # blocked by Gatekeeper or damaged: use the built-in method below
         if not helper_ok:
             remaining = [p for p in chunk if os.path.lexists(p) and p not in moved]
-            if remaining and label and not any(os.path.islink(p) for p in remaining):
+            if remaining and (label or moved_out is not None) and not any(os.path.islink(p) for p in remaining):
                 # Undo needs to know where things went: Finder reports it (the JXA method can't)
                 moved.update(_finder_trash(remaining))
                 remaining = [p for p in remaining if os.path.lexists(p)]
@@ -417,8 +428,17 @@ def record_trash_batch(label, moved, batch_id=None, root=False):
             history.append(existing)
         else:
             history.append({"id": batch_id or new_batch_id(), "time": time.time(), "label": label, "items": new_items})
-        return {"batches": history[-TRASH_HISTORY_KEEP:]}
+        return {"batches": _cap_history(history)}
     update_state(TRASH_HISTORY, change)
+
+
+def _cap_history(history):
+    """Keep the last TRASH_HISTORY_KEEP batches, plus every app-update rollback
+    (up to 50) so a week of cleaning never makes an update impossible to undo."""
+    keep_ids = {id(b) for b in history[-TRASH_HISTORY_KEEP:]}
+    updates = [b for b in history if any(i.get("replace") and i["from"].endswith(".app") for i in b["items"])][-50:]
+    keep_ids.update(id(b) for b in updates)
+    return [b for b in history if id(b) in keep_ids]
 
 
 def _finder_trash(paths):
@@ -445,71 +465,119 @@ def last_trash_batch():
     return None
 
 
+def batch_running_apps(batch):
+    """Apps a batch would replace that are open right now (rolling back an update)."""
+    return [it["from"] for it in batch["items"]
+            if it.get("replace") and it["from"].endswith(".app") and os.path.lexists(it["from"]) and app_is_running(it["from"])]
+
+
 def undo_trash_batch(batch):
-    """Put a recorded batch back where it came from. Returns (restored, skipped)."""
-    restored, skipped = [], []
+    """Put a recorded batch back where it came from. Returns (restored, skipped).
+
+    For "replace" items (rolling back an update or a cleaned database) the current
+    version moves to the Trash first, and that move is itself recorded, so a rollback
+    can be undone too. Root-owned items go back with one password prompt. Only the
+    items that were actually put back (or can never be) leave the history, so a
+    cancelled password prompt can simply be retried."""
+    restored, skipped, done_items = [], [], []
+    replaced = {}      # current versions moved aside -> where they went
     root_moves = []
+    label = batch.get("label", "")
     for it in batch["items"]:
         src, dest = it["to"], it["from"]
-        if it.get("root"):
-            if os.path.lexists(src) and not os.path.lexists(dest):
-                root_moves.append((src, dest))
-            else:
-                skipped.append(dest)
-            continue
         if not os.path.lexists(src):
             skipped.append(dest)  # emptied from the Trash, or already put back
+            done_items.append(it)
+            continue
+        if it.get("root"):
+            root_moves.append(it)
             continue
         if os.path.lexists(dest) and it.get("replace"):
-            # Rolling back (an update, or a cleaned database): the current version
-            # moves to the Trash first, with a database's -wal/-shm journal files.
-            extras = [dest + s for s in ("-wal", "-shm", "-journal") if os.path.lexists(dest + s)]
-            if trash_paths([dest] + extras, finder_fallback=False):
+            extras = [dest + x for x in ("-wal", "-shm", "-journal") if os.path.lexists(dest + x)]
+            aside = {}
+            if trash_paths([dest] + extras, finder_fallback=False, moved_out=aside):
                 skipped.append(dest)
                 continue
+            replaced.update(aside)
         if os.path.lexists(dest):
             skipped.append(dest)  # something new lives there now (an app recreated its cache)
+            done_items.append(it)
             continue
-        try:
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            os.rename(src, dest)
+        if _move_back(src, dest):
             restored.append(dest)
-            continue
-        except OSError:
-            pass
-        if os.path.islink(src):
-            skipped.append(dest)  # Finder would move the link's target instead
-            continue
-        # Privacy settings or ownership can block direct access to the Trash; Finder can do it.
-        parent = os.path.dirname(dest)
-        script = [
-            "on run argv",
-            'tell application "Finder" to set m to move (POSIX file (item 1 of argv) as alias) to (POSIX file (item 2 of argv) as alias)',
-            "return POSIX path of (m as alias)",
-            "end run",
-        ]
-        cmd = ["/usr/bin/osascript"]
-        for line in script:
-            cmd += ["-e", line]
-        res = subprocess.run(cmd + [src, parent], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        landed = res.stdout.decode("utf-8", "replace").strip().rstrip("/")
-        if res.returncode == 0 and landed and landed != dest:
-            try:
-                os.rename(landed, dest)
-            except OSError:
-                pass
-        (restored if os.path.lexists(dest) else skipped).append(dest)
+            done_items.append(it)
+        else:
+            skipped.append(dest)
     if root_moves:
         import shlex
-        script = "; ".join("mkdir -p {p} && [ ! -e {d} ] && mv {s} {d}".format(
-            p=shlex.quote(os.path.dirname(d)), s=shlex.quote(s_), d=shlex.quote(d)) for s_, d in root_moves)
-        run_as_admin(script, "Burrow needs your password to put back system items.")
-        for _, d in root_moves:
-            (restored if os.path.lexists(d) else skipped).append(d)
-    # One undo attempt per batch: anything skipped stays in the Trash, and the
-    # next Undo reaches the batch before it.
-    update_state(TRASH_HISTORY, lambda data: {"batches": [b for b in data.get("batches", []) if not _same_batch(b, batch)]})
+        trash = os.path.join(HOME, ".Trash")
+        tag = new_batch_id().replace(".", "")[-8:]
+        lines, asides = [], {}
+        for i, it in enumerate(root_moves):
+            src, dest = it["to"], it["from"]
+            q = shlex.quote
+            if it.get("replace") and os.path.lexists(dest):
+                aside = os.path.join(trash, "{} replaced-{}-{}".format(os.path.basename(dest), tag, i))
+                asides[dest] = aside
+                lines.append("[ ! -e {a} ] && mv {d} {a}".format(a=q(aside), d=q(dest)))
+            lines.append("mkdir -p {p} && [ ! -e {d} ] && mv {s} {d}".format(p=q(os.path.dirname(dest)), s=q(src), d=q(dest)))
+        ok, _ = run_as_admin("; ".join(lines), "Burrow needs your password to put back system items.")
+        for it in root_moves:
+            dest = it["from"]
+            if ok is not None and os.path.lexists(dest) and not os.path.lexists(it["to"]):
+                restored.append(dest)
+                done_items.append(it)
+            else:
+                skipped.append(dest)
+        replaced.update({d: a for d, a in asides.items() if os.path.lexists(a)})
+    if replaced:
+        # The versions that were current before the rollback: undoable in turn
+        record_trash_batch("Before undoing “{}”".format(label), replaced, root=bool(root_moves))
+    done_ids = {id(x) for x in done_items}
+
+    def change(data):
+        out = []
+        for b in data.get("batches", []):
+            if _same_batch(b, batch):
+                left = [it for it in b["items"] if not any(it["to"] == d["to"] for d in done_items)]
+                if left:
+                    b = dict(b, items=left)  # what didn't go back stays, to retry
+                    out.append(b)
+                continue
+            out.append(b)
+        return {"batches": out}
+    update_state(TRASH_HISTORY, change)
+    del done_ids
     return restored, skipped
+
+
+def _move_back(src, dest):
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.rename(src, dest)
+        return True
+    except OSError:
+        pass
+    if os.path.islink(src):
+        return False  # Finder would move the link's target instead
+    # Privacy settings or ownership can block direct access to the Trash; Finder can do it.
+    script = [
+        "on run argv",
+        'tell application "Finder" to set m to move (POSIX file (item 1 of argv) as alias) to (POSIX file (item 2 of argv) as alias)',
+        "return POSIX path of (m as alias)",
+        "end run",
+    ]
+    cmd = ["/usr/bin/osascript"]
+    for line in script:
+        cmd += ["-e", line]
+    res = subprocess.run(cmd + [src, os.path.dirname(dest)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    landed = res.stdout.decode("utf-8", "replace").strip().rstrip("/")
+    if res.returncode == 0 and landed and landed != dest:
+        try:
+            os.rename(landed, dest)
+        except OSError:
+            pass
+    return os.path.lexists(dest)
 
 
 def _same_batch(a, b):

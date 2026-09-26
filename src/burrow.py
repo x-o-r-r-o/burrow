@@ -437,7 +437,7 @@ def cmd_hub(query):
 def self_update_item():
     try:
         import updates
-        up = updates.check_self()
+        up = updates.check_self(network=False)  # never wait for the network while typing
     except Exception:  # noqa: BLE001
         return None
     if not up:
@@ -1500,11 +1500,15 @@ def cmd_updates(query):
     win = window_item("updates", "Open the Updates Window", "Release notes, update all, roll back, with progress for each app")
     if win and not query:
         items.append(win)
-    if ups:
+    if failure and result and ups:
+        items.append(item("The Last Check Didn't Finish", "{} · showing results from {} · ↩ Try again".format(failure, checked_ago),
+                          icon("warning"), act("rescan", KEYWORDS["updates"] + " ", kind="updates")))
+    if ups and not query:
         items.append(item(
             "{} Available".format(plural(len(ups), "Update")),
             "↩ Install {} · checked {}".format(
-                "all {} Burrow can install".format(len(installable)) if installable else "none automatically", checked_ago),
+                ("all " + plural(len(installable), "update") + " Burrow can install") if len(installable) > 1
+                else ("the one Burrow can install" if installable else "none automatically"), checked_ago),
             icon("update"),
             act("update_install", "", paths=[u["path"] for u in installable]) if installable else None,
             valid=bool(installable),
@@ -1556,6 +1560,8 @@ def cmd_updates(query):
             uid="update-" + u["path"],
         ))
 
+    if query and ups and not any(matches(query, u["name"], u["source"]) for u in ups):
+        items.append(item("No Updates Match “{}”".format(query), "{} available in total".format(plural(len(ups), "update")), icon("search"), valid=False))
     if not running:
         if ups:
             items.append(item("Check Again", "Last checked {} · {} apps up to date".format(checked_ago, result.get("current", 0)),
@@ -1672,7 +1678,9 @@ def cmd_browsers(query):
     if not found:
         emit([item("No Browsers Found", "Burrow looks for Chromium, Firefox, Safari and Orion data", icon("check"), valid=False)])
         return
-    closed = [b for b in found if not browsers.is_running(b) and (b["kind"] != "safari" or b.get("access"))]
+    executables = engine.running_executables()
+    running = {b["id"]: browsers.is_running(b, executables) for b in found}
+    closed = [b for b in found if not running[b["id"]] and (b["kind"] != "safari" or b.get("access"))]
     win = window_item("browsers", "Open the Browsers Window", "Choose what to clean with switches, for every browser")
     if win and not query:
         items.append(win)
@@ -1687,7 +1695,7 @@ def cmd_browsers(query):
         state = []
         if not b["installed"]:
             state.append("app not installed")
-        if browsers.is_running(b):
+        if running[b["id"]]:
             state.append("open")
         if b["kind"] == "safari" and not b.get("access"):
             items.append(item(
@@ -1702,7 +1710,11 @@ def cmd_browsers(query):
                                    "↩ Choose what to clean"] if x),
             file_icon(b["app"]) if b.get("app") else icon("browser"),
             valid=False, autocomplete="=" + b["id"],
-            mods={"cmd": mod("Reveal its data folder", act("reveal", b["root"]))},
+            mods={
+                "cmd": mod("Reveal its data folder", act("reveal", b["root"])),
+                "alt": mod("Clean now with your saved choices", act("browser_clean", b["id"])),
+                "ctrl": mod("Copy the data folder path", act("copy", b["root"])),
+            },
             uid="browser-" + b["id"],
         ))
     emit(items)
@@ -1725,6 +1737,9 @@ def browser_view(bid):
     try:
         preview = browsers.plan(b, prof_ids, choice["categories"], choice["range"])
     except browsers.BrowserError as e:
+        if "profile" in str(e):
+            set_browser_choice(bid, profile="all")  # the saved profile is gone: back to all
+            return browser_view(bid)
         emit(items + [item(str(e).split(".")[0], "↩ Open Privacy settings", icon("warning"), act("open", FULL_DISK_ACCESS))])
         return
     chosen = ", ".join(labels[c].lower() for c in choice["categories"]) or "nothing selected"
@@ -1744,8 +1759,10 @@ def browser_view(bid):
         ))
     order = [k for k, _, _ in browsers.RANGES]
     nxt = order[(order.index(choice["range"]) + 1) % len(order)]
-    items.append(item("Time Range: " + ranges[choice["range"]], "↩ Change to “{}”".format(ranges[nxt]), icon("refresh"),
-                       act("browser_choice", bid, range=nxt)))
+    prev = order[(order.index(choice["range"]) - 1) % len(order)]
+    items.append(item("Time Range: " + ranges[choice["range"]],
+                      "↩ “{}” · ⌥↩ “{}” · cache and tabs are always cleared fully".format(ranges[nxt], ranges[prev]), icon("refresh"),
+                      act("browser_choice", bid, range=nxt), mods={"alt": mod("Change to “{}”".format(ranges[prev]), act("browser_choice", bid, range=prev))}))
     if len(profiles) > 1:
         ids = ["all"] + [p["id"] for p in profiles]
         nprof = ids[(ids.index(choice["profile"]) + 1) % len(ids)] if choice["profile"] in ids else "all"
@@ -1754,10 +1771,12 @@ def browser_view(bid):
     for n in preview["notes"]:
         items.append(item(n, "", icon("info"), valid=False))
     if b["kind"] in ("chromium", "firefox"):
-        items.append(item("Reset Settings", "Default settings; extensions go to the Trash too · bookmarks, history and passwords stay · ↩ Reset",
+        what = ("extensions and their data go to the Trash too" if b["kind"] == "chromium" else "extensions stay")
+        items.append(item("Reset Settings", "Defaults; {} · bookmarks, history, passwords stay".format(what),
                           icon("refresh"), act("browser_reset", bid, full=False)))
     if b["kind"] in ("chromium", "firefox", "orion"):
-        items.append(item("Full Reset", "Moves the whole {} to the Trash, like a fresh install · ↩ Reset".format("profile" if len(profiles) == 1 else "profiles selected"),
+        which = "profile" if len(prof_ids) == 1 else "all {} profiles".format(len(prof_ids))
+        items.append(item("Full Reset", "Everything in the {} goes to the Trash, bookmarks and passwords too".format(which),
                           icon("warning"), act("browser_reset", bid, full=True)))
     emit(items)
 
@@ -1822,7 +1841,11 @@ def browser_reset_action(bid, full):
                    "the selected profile" if len(prof_ids) == 1 and len(b["profiles"]) > 1 else b["name"])
     else:
         title = "Reset {} settings?".format(b["name"])
-        msg = "Settings go back to their defaults and extensions move to the Trash with them (Undo brings both back). Bookmarks, history, passwords and cookies stay."
+        if b["kind"] == "chromium":
+            msg = ("Settings go back to their defaults. Extensions and their stored data (for example a wallet or password-manager "
+                   "extension's local vault) move to the Trash with them; Undo brings everything back. Bookmarks, history, passwords and cookies stay.")
+        else:
+            msg = "Settings go back to their defaults. Extensions, bookmarks, history, passwords and cookies stay."
     if not confirm(title, msg, "Reset"):
         return None
     if not quit_browser_if_needed(b, "Resetting"):
@@ -1839,12 +1862,13 @@ def browser_cache_all():
     import browsers
     done, skipped, freed = [], [], 0
     batch_label = "Clear browser caches"
+    batch = engine.new_batch_id()
     for b in browsers.discover():
         if browsers.is_running(b) or (b["kind"] == "safari" and not b.get("access")):
             skipped.append(b["name"])
             continue
         try:
-            res = browsers.clean(b, [], ["cache"], "all", label=batch_label)
+            res = browsers.clean(b, [], ["cache"], "all", label=batch_label, batch_id=batch)
             freed += res["freed"]
             done.append(b["name"])
         except Exception:  # noqa: BLE001
@@ -1910,7 +1934,8 @@ def menubar_pids():
     pids = []
     for line in engine.sh(["/bin/ps", "-Axo", "pid=,comm="]).splitlines():
         parts = line.strip().split(None, 1)
-        if len(parts) == 2 and parts[1] == MENUBAR_BIN and parts[0].isdigit():
+        # Any copy of the helper (the workflow folder may have moved, e.g. a new sync folder)
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].endswith("/bin/BurrowMenu"):
             pids.append(int(parts[0]))
     return pids
 
@@ -1951,12 +1976,15 @@ def menubar_set_login(enabled):
         with open(LAUNCH_AGENT, "wb") as f:
             plistlib.dump({
                 "Label": LAUNCH_AGENT_LABEL,
-                "ProgramArguments": [MENUBAR_BIN, ENGINE, menubar_interval()],
+                # If Burrow is removed, the login item removes itself instead of failing daily
+                "ProgramArguments": ["/bin/sh", "-c",
+                                     'if [ -x "$0" ]; then exec "$0" "$1" "$2"; else rm -f "$HOME/Library/LaunchAgents/{}.plist"; fi'.format(LAUNCH_AGENT_LABEL),
+                                     MENUBAR_BIN, ENGINE, menubar_interval()],
                 "RunAtLoad": True,
                 "ProcessType": "Interactive",
             }, f)
     else:
-        subprocess.run(["/bin/launchctl", "bootout", "gui/{}/{}".format(os.getuid(), LAUNCH_AGENT_LABEL)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Only stop it starting at login; the icon that's showing now stays
         try:
             os.remove(LAUNCH_AGENT)
         except OSError:
@@ -2110,6 +2138,14 @@ def dispatch(action, target, p):
         batch = engine.last_trash_batch()
         if not batch:
             return "Nothing to undo"
+        open_apps = engine.batch_running_apps(batch)
+        if open_apps:
+            names = ", ".join(os.path.basename(a)[:-4] for a in open_apps)
+            if not confirm("Quit {}?".format(names), "Undoing “{}” puts the previous version back, so {} needs to be closed.".format(batch["label"], names), "Quit and Undo"):
+                return None
+            for a in open_apps:
+                if not engine.quit_app(a, engine.read_plist_key(engine.app_info_plist(a), "CFBundleIdentifier")):
+                    return "{} didn't quit, so nothing was undone".format(os.path.basename(a)[:-4])
         restored, skipped = engine.undo_trash_batch(batch)
         for kind in ("clean", "purge"):
             job_for(kind).clear()

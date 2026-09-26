@@ -304,6 +304,7 @@ def housekeeping(max_job_age=3 * 86400):
 
 def save_state(name, data):
     import tempfile
+    os.makedirs(CACHE_DIR, exist_ok=True)  # the daily check / command line may run first
     fd, tmp = tempfile.mkstemp(dir=CACHE_DIR, prefix="." + name, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:

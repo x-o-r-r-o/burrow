@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- Fixed: the daily update check and the command-line engine couldn't save results if Alfred hadn't created Burrow's cache folder yet. The error was swallowed, so the check silently found nothing.
+
 ## 1.0.0
 
 The first release.

@@ -33,6 +33,7 @@ SCRIPT_FILTERS = [
     ("updates", "buupdates", "App Updates", "Check your apps for new versions and install them safely", "update", "Checking…"),
     ("clean", "buclean", "Clean System", "Preview and remove caches, logs and temporary files", "clean", "Scanning…"),
     ("optimize", "buoptimize", "Optimize System", "Flush DNS, rebuild databases, refresh services", "optimize", "Checking…"),
+    ("processes", "bukill", "Processes", "See what's using CPU and memory, and quit or force quit it", "process", "Reading processes…"),
     ("uninstall", "buuninstall", "Uninstall App", "Remove apps and their leftover files", "uninstall", "Listing apps…"),
     ("analyze", "buanalyze", "Analyze Disk", "Browse folders sorted by size", "analyze", "Analyzing…"),
     ("purge", "bupurge", "Purge Dev Artifacts", "Remove old node_modules, .next, dist, target, venv…", "purge", "Scanning projects…"),
@@ -228,6 +229,13 @@ def build_plist(icon_for):
                 "label": "Status Refresh",
                 "description": "How often System Status refreshes while open.",
                 "config": {"default": "3", "pairs": [["1 Second", "1"], ["3 Seconds", "3"], ["5 Seconds", "5"]]},
+            },
+            {
+                "type": "checkbox",
+                "variable": "confirm_force",
+                "label": "Force Quit",
+                "description": "Processes asks before force quitting, because unsaved changes are lost.",
+                "config": {"default": True, "required": False, "text": "Ask before force quitting"},
             },
             {
                 "type": "textfield",

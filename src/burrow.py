@@ -44,6 +44,7 @@ DEFAULT_KEYWORDS = {
     "dupes": "budupes",
     "updates": "buupdates",
     "browsers": "bubrowsers",
+    "processes": "bukill",
 }
 
 
@@ -98,7 +99,7 @@ def tilde(path):
 
 
 def plural(n, word):
-    return "{} {}{}".format(n, word, "" if n == 1 else "s")
+    return "{} {}{}".format(n, word, "" if n == 1 else ("es" if word.endswith(("s", "x", "ch", "sh")) else "s"))
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +381,7 @@ HUB = [
     ("clean", "Clean System", "Move caches, logs and temporary files to the Trash", "clean"),
     ("browsers", "Browsers", "Clear history, cache, cookies and more, or reset a browser", "browser"),
     ("optimize", "Optimize System", "Flush DNS, rebuild databases, refresh services", "optimize"),
+    ("processes", "Processes", "See what's using CPU and memory, and quit or force quit it", "process"),
     ("uninstall", "Uninstall App", "Remove apps and their leftover files", "uninstall"),
     ("analyze", "Analyze Disk", "Browse folders sorted by size", "analyze"),
     ("large", "Large Files", "Find the biggest files in your home folder", "large"),
@@ -603,8 +605,9 @@ def cmd_status(query):
 
     for i, proc in enumerate(data["top_processes"]):
         items.append(item(
-            proc["name"], "Top process · CPU {} · Memory {}".format(format_percent(proc["cpu"]), format_percent(proc["memory"])),
-            icon("process"), activity,
+            proc["name"], "Top process · CPU {} · Memory {} · ↩ Show in Processes".format(format_percent(proc["cpu"]), format_percent(proc["memory"])),
+            icon("process"), act("go", "processes " + proc["name"]),
+            mods={"cmd": mod("Open Activity Monitor", activity)},
         ))
 
     items = [i for i in items if matches(query, i["title"], i["subtitle"])]
@@ -1319,6 +1322,124 @@ def cmd_startup(query):
             uid="startup-" + e["path"],
         ))
     emit(items)
+
+
+# ---------------------------------------------------------------------------
+# bukill — Processes
+# ---------------------------------------------------------------------------
+
+PROCESS_VIEW = "process-view.json"
+PROCESS_ROWS = 60
+
+
+def process_view():
+    view = engine.load_state(PROCESS_VIEW)
+    return {"sort": view.get("sort") if view.get("sort") in ("cpu", "memory") else "cpu", "group": view.get("group", True)}
+
+
+def cmd_processes(query):
+    view = process_view()
+    procs = engine.list_processes()
+    if view["group"]:
+        rows = engine.group_processes(procs)
+    else:
+        rows = [{"name": p["name"], "app": engine.app_bundle_of(p["path"]), "pid": p["pid"], "pids": [p["pid"]], "path": p["path"],
+                 "uid": p["uid"], "others": p["uid"] != os.getuid(), "cpu": p["cpu"], "mem": p["mem"],
+                 "critical": p["name"] in engine.CRITICAL_PROCESSES or p["pid"] <= 1} for p in procs]
+    key = (lambda r: (-r["mem"], -r["cpu"])) if view["sort"] == "memory" else (lambda r: (-r["cpu"], -r["mem"]))
+    rows.sort(key=key)
+    q = query.strip()
+    items = []
+    if not q:
+        other = "memory" if view["sort"] == "cpu" else "CPU"
+        items.append(item(
+            "{}  —  sorted by {}".format(plural(len(procs), "Process"), "CPU" if view["sort"] == "cpu" else "memory"),
+            "↩ Sort by {} · ⌥↩ {}".format(other, "Show every process separately" if view["group"] else "Group app helpers"),
+            icon("process"), act("proc_view", "", sort="memory" if view["sort"] == "cpu" else "cpu"),
+            mods={
+                "alt": mod("Show every process separately" if view["group"] else "Group each app's helper processes under it",
+                           act("proc_view", "", group=not view["group"])),
+                "cmd": mod("Open Activity Monitor", act("open_app", "Activity Monitor")),
+            },
+            uid="processes-summary",
+        ))
+    shown = 0
+    for r in rows:
+        if q.isdigit():
+            if not any(str(pid).startswith(q) for pid in r["pids"]):
+                continue
+        elif "/" in q:
+            if q.lower() not in r["path"].lower():
+                continue
+        elif not matches(q, r["name"]):
+            continue
+        shown += 1
+        if shown > PROCESS_ROWS:
+            break
+        payload = {"pids": r["pids"], "pid": r["pid"], "path": r["path"], "app": r["app"], "name": r["name"], "critical": r["critical"]}
+        details = ["CPU " + format_percent(r["cpu"]), format_bytes(r["mem"])]
+        if len(r["pids"]) > 1:
+            details.append(plural(len(r["pids"]), "process"))
+        if r["others"]:
+            details.append("🔒 " + ("root" if r["uid"] == 0 else "another user"))
+        if r["critical"]:
+            details.append("⚠️ system")
+        verb = "Quit" if r["app"] else "End"
+        mods = {
+            "alt": mod("Force quit — unsaved changes are lost" + (" · 🔒 asks for your password" if r["others"] else ""),
+                       act("proc_quit", r["name"], force=True, **payload)),
+            "cmd": mod("Reveal in Finder", act("reveal", r["path"])),
+            "ctrl": mod("Copy path", act("copy", r["path"])),
+        }
+        if r["app"] and not r["critical"]:
+            mods["fn"] = mod("Restart {} (quit it and open it again)".format(r["name"]), act("proc_restart", r["name"], **payload))
+        items.append(item(
+            r["name"], " · ".join(details + ["↩ " + verb, "⌥↩ Force quit"]),
+            file_icon(r["app"]) if r["app"] else icon("warning" if r["critical"] else "process"),
+            act("proc_quit", r["name"], force=False, **payload), mods=mods,
+            text={"copy": r["path"], "largetype": "{}\nPID {}\n{}".format(r["name"], ", ".join(str(p) for p in r["pids"][:40]), r["path"])},
+            quicklook=None,
+        ))
+    if q and not shown:
+        items.append(item("No Matching Process", "Type part of a name, a PID, or a path with /", icon("search"), valid=False))
+    emit(items)
+
+
+def proc_quit(p, force):
+    name = p.get("name") or "the process"
+    if p.get("critical") and not confirm(
+            "{} {}?".format("Force quit" if force else "End", name),
+            "{} is part of macOS. Ending it can log you out, restart the Mac or make it stop responding.".format(name), "End Anyway"):
+        return None
+    if force and os.environ.get("confirm_force", "1") not in ("0", "false") and not p.get("critical") and not confirm(
+            "Force Quit {}?".format(name), "Unsaved changes in {} will be lost.".format(name), "Force Quit"):
+        return None
+    pids = [pid for pid in p.get("pids", []) if engine.process_matches(pid, p["path"])]
+    if not pids:
+        return "{} isn't running any more".format(name)
+    if p.get("app") and not force:
+        bid = engine.read_plist_key(engine.app_info_plist(p["app"]), "CFBundleIdentifier")
+        if engine.quit_app(p["app"], bid, wait=8):
+            return "Quit " + name
+        return "{} is still open (it may be asking to save) · ⌥↩ to force quit".format(name)
+    alive, cancelled = engine.signal_processes(pids, signal.SIGKILL if force else signal.SIGTERM,
+                                               "Burrow wants to {} {}.".format("force quit" if force else "end", name))
+    if cancelled:
+        return None
+    if alive:
+        return "{} is still running{}".format(name, "" if force else " · ⌥↩ to force quit")
+    return "{} {}".format("Force quit" if force else "Ended", name)
+
+
+def proc_restart(p):
+    name = p.get("name") or "the app"
+    if not p.get("app") or not engine.process_matches(p["pid"], p["path"]):
+        return "{} isn't running any more".format(name)
+    bid = engine.read_plist_key(engine.app_info_plist(p["app"]), "CFBundleIdentifier")
+    if not engine.quit_app(p["app"], bid, wait=10):
+        return "{} didn't quit (it may be asking to save), so it wasn't restarted".format(name)
+    subprocess.run(["/usr/bin/open", "-a", p["app"]])
+    return "Restarted " + name
 
 
 # ---------------------------------------------------------------------------
@@ -2158,6 +2279,18 @@ def dispatch(action, target, p):
         failed = engine.remove_startup_items(entries, batch_id=engine.new_batch_id())
         alfred_search(KEYWORDS["startup"] + " ")
         return trashed_message("Removed {}".format(plural(len(entries) - len(failed), "startup item")), failed)
+    elif action == "proc_quit":
+        msg = proc_quit(p, bool(p.get("force")))
+        if msg:
+            alfred_search(KEYWORDS["processes"] + " ")
+        return msg
+    elif action == "proc_restart":
+        return proc_restart(p)
+    elif action == "proc_view":
+        view = process_view()
+        view.update({k: p[k] for k in ("sort", "group") if k in p})
+        engine.save_state(PROCESS_VIEW, view)
+        alfred_search(KEYWORDS["processes"] + " ")
     elif action == "uninstall":
         return uninstall(target, p.get("name") or os.path.basename(target)[:-4], p.get("size") or 0,
                          excluded=set(p.get("excluded") or []), reviewed=p.get("reviewed", False), reset=p.get("reset", False))
@@ -2378,6 +2511,7 @@ COMMANDS = {
     "dupes": cmd_dupes,
     "updates": cmd_updates,
     "browsers": cmd_browsers,
+    "processes": cmd_processes,
     "run": cmd_run,
 }
 

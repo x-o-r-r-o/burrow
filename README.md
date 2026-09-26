@@ -119,6 +119,20 @@ Safari's data is protected by macOS. To clean it, give Alfred **Full Disk Access
 ![Browsers](images/about/browsers.png)
 
 
+### Processes
+
+See what's using your Mac's CPU and memory via the `bukill` keyword. CPU is measured over the last moment, like Activity Monitor. Each app's helper processes are grouped under it, and copies of one program share a row. Type part of a name, a PID, or a path containing `/` to filter.
+
+* <kbd>↩</kbd> Quit an app the normal way, so it can ask to save. Other processes are asked to end.
+* <kbd>⌥</kbd><kbd>↩</kbd> Force quit. Unsaved changes are lost, so Burrow asks first (you can turn that off in the Workflow’s Configuration).
+* <kbd>fn</kbd><kbd>↩</kbd> Restart an app.
+* <kbd>⌘</kbd><kbd>↩</kbd> Reveal in Finder. <kbd>⌃</kbd><kbd>↩</kbd> Copy the path. <kbd>⌘</kbd><kbd>L</kbd> Show its PIDs.
+* On the top row, <kbd>↩</kbd> sorts by CPU or memory and <kbd>⌥</kbd><kbd>↩</kbd> groups or ungroups helper processes.
+
+Processes owned by another user (🔒) ask for your password through the standard macOS prompt. Parts of macOS whose ending would log you out or freeze the Mac (⚠️) get a warning first. If a process has already exited and its PID was reused, Burrow leaves the new process alone.
+
+![Processes](images/about/processes.png)
+
 ### More Commands
 
 * `buoptimize` Flush DNS, free memory, rebuild Launch Services, reset Quick Look and font caches. Homebrew, Docker and simulator tasks appear when those are installed.

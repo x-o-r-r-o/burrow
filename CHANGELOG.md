@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0
+
+- **Processes** (`bukill`): see what's using CPU and memory, with live CPU measured like Activity Monitor and each app's helpers grouped under it. Quit apps normally, end or force quit any process (other users' processes ask for your password), or restart an app. Critical parts of macOS get a warning first, and a reused PID is never ended by mistake.
+- **System Status:** ↩ on a top process opens it in Processes.
+
 ## 1.2.1
 
 - **Icons:** Undo, Startup Items, Info, Check, Warning, Error and Download icons show their symbol again, instead of a plain shape.

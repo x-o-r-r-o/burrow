@@ -33,7 +33,7 @@ class ScriptFilterJSONTest(unittest.TestCase):
             if it.get("valid", True) and "variables" in it:
                 self.assertIn("action", it["variables"], command)
             for key, m in (it.get("mods") or {}).items():
-                self.assertIn(key, ("cmd", "alt", "ctrl", "shift"), command)
+                self.assertIn(key, ("cmd", "alt", "ctrl", "shift", "fn"), command)
                 self.assertIn("action", m.get("variables", {}), command)
             if "rerun" in data:
                 self.assertTrue(0.1 <= data["rerun"] <= 5, command)

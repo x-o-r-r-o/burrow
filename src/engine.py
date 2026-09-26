@@ -2531,6 +2531,163 @@ def force_quit(app_path):
     return not app_is_running(app_path)
 
 
+# ---------------------------------------------------------------------------
+# Processes
+# ---------------------------------------------------------------------------
+
+# Quitting these logs you out, restarts the Mac or leaves macOS unusable.
+CRITICAL_PROCESSES = {
+    "kernel_task", "launchd", "WindowServer", "loginwindow", "kernelmanagerd", "logd", "opendirectoryd",
+    "securityd", "coreservicesd", "configd", "notifyd", "syslogd", "powerd", "runningboardd", "UserEventAgent",
+    "distnoted", "cfprefsd", "trustd", "diskarbitrationd", "fseventsd", "mds", "watchdogd", "sandboxd",
+    "coreaudiod", "hidd", "bluetoothd", "airportd", "mDNSResponder", "securityd_service", "backboardd",
+}
+PROCESS_SAMPLE = "process-sample.json"
+
+
+def _cpu_seconds(text):
+    """ps TIME ("[[dd-]hh:]mm:ss.ss") -> seconds."""
+    try:
+        days, _, rest = text.rpartition("-")
+        parts = [float(x) for x in rest.split(":")]
+        secs = 0.0
+        for part in parts:
+            secs = secs * 60 + part
+        return secs + (int(days) * 86400 if days else 0)
+    except ValueError:
+        return 0.0
+
+
+def _ps_processes():
+    out = []
+    lines = sh(["/bin/ps", "-Axo", "pid=,ppid=,uid=,pcpu=,rss=,time=,comm="]).splitlines()
+    for line in lines:
+        parts = line.split(None, 6)
+        if len(parts) != 7 or not parts[0].isdigit():
+            continue
+        try:
+            out.append({
+                "pid": int(parts[0]), "ppid": int(parts[1]), "uid": int(parts[2]), "pcpu": float(parts[3]),
+                "mem": int(parts[4]) * 1024, "time": _cpu_seconds(parts[5]), "path": parts[6],
+                "name": os.path.basename(parts[6]) or parts[6],
+            })
+        except ValueError:
+            pass
+    return out
+
+
+def list_processes():
+    """Every process with its CPU use over the last moment (like Activity Monitor), not
+    ps's long-running average. Keystrokes reuse the previous sample, so typing stays fast."""
+    now = time.time()
+    procs = _ps_processes()
+    prev = load_state(PROCESS_SAMPLE)
+    age = now - prev.get("t", 0)
+    if age < 0.4 and prev.get("cpu"):
+        cpu = {int(k): v for k, v in prev["cpu"].items()}
+        for p in procs:
+            p["cpu"] = cpu.get(p["pid"], p["pcpu"])
+        return procs
+    if age > 60 or not prev.get("times"):
+        time.sleep(0.4)  # nothing recent to compare with: take a second sample
+        base = {p["pid"]: p["time"] for p in procs}
+        start, now = now, time.time()
+        procs = _ps_processes()
+        age = now - start
+    else:
+        base = {int(k): v for k, v in prev["times"].items()}
+    for p in procs:
+        before = base.get(p["pid"])
+        p["cpu"] = round(max(0.0, (p["time"] - before) / age * 100), 1) if before is not None and age > 0 else p["pcpu"]
+    save_state(PROCESS_SAMPLE, {"t": now, "times": {p["pid"]: p["time"] for p in procs}, "cpu": {p["pid"]: p["cpu"] for p in procs}})
+    return procs
+
+
+def app_bundle_of(path):
+    """The outermost .app a process runs from (helpers inside an app belong to it)."""
+    i = path.find(".app/")
+    return path[:i + 4] if i > 0 else None
+
+
+def group_processes(procs):
+    """Group an app's helper processes under it, and copies of one program (its own
+    child copies, or several started by the same parent) into one row."""
+    by_pid = {p["pid"]: p for p in procs}
+    groups = {}
+    for p in procs:
+        bundle = app_bundle_of(p["path"])
+        if bundle:
+            key = "app:" + bundle
+        else:
+            root, seen = p, {p["pid"]}
+            while True:
+                parent = by_pid.get(root["ppid"])
+                if not parent or parent["pid"] in seen or parent["path"] != p["path"]:
+                    break
+                seen.add(parent["pid"])
+                root = parent
+            # Copies of one program started by the same parent (mdworker_shared…) are one row too
+            key = "exe:{}:{}".format(root["ppid"], p["path"])
+        groups.setdefault(key, []).append(p)
+    out = []
+    for key, members in groups.items():
+        pids = {m["pid"] for m in members}
+        main = next((m for m in members if m["ppid"] not in pids), members[0])
+        bundle = key[4:] if key.startswith("app:") else None
+        if bundle:
+            main = next((m for m in members if m["path"].startswith(bundle + "/Contents/MacOS/") and m["ppid"] not in pids), main)
+        out.append({
+            "name": os.path.basename(bundle)[:-4] if bundle else main["name"],
+            "app": bundle, "pid": main["pid"], "pids": sorted(pids), "path": bundle or main["path"],
+            "uid": main["uid"], "others": any(m["uid"] != os.getuid() for m in members),
+            "cpu": round(sum(m["cpu"] for m in members), 1), "mem": sum(m["mem"] for m in members),
+            "critical": main["name"] in CRITICAL_PROCESSES or main["pid"] <= 1,
+        })
+    return out
+
+
+def process_matches(pid, path):
+    """The pid still runs `path` (it wasn't reused by another program since the list was shown)."""
+    comm = sh(["/bin/ps", "-p", str(pid), "-o", "comm="]).strip()
+    return bool(comm) and (comm == path or comm.startswith(path.rstrip("/") + "/"))
+
+
+def signal_processes(pids, sig, prompt):
+    """Send a signal; processes owned by another user (root…) go through the macOS
+    password prompt. Returns (still running pids, cancelled)."""
+    import signal as _signal
+    denied = []
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            denied.append(pid)
+    cancelled = False
+    if denied:
+        name = "KILL" if sig == _signal.SIGKILL else "TERM"
+        ok, _ = run_as_admin("/bin/kill -{} {}".format(name, " ".join(str(p) for p in denied)), prompt)
+        cancelled = ok is None
+    deadline = time.time() + (1 if sig == _signal.SIGKILL else 5)
+    alive = list(pids)
+    while alive and time.time() < deadline:
+        time.sleep(0.25)
+        alive = [p for p in alive if _pid_alive(p)]
+    return alive, cancelled
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    # A process that has ended but whose parent hasn't collected it yet ("zombie") is gone
+    return not sh(["/bin/ps", "-p", str(pid), "-o", "stat="]).strip().startswith("Z")
+
+
 def needs_root(path):
     """Moving `path` needs admin rights (its folder isn't writable by us)."""
     parent = os.path.dirname(path.rstrip("/"))

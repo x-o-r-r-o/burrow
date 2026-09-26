@@ -2457,15 +2457,21 @@ def uninstall(app_path, name, app_size, excluded=frozenset(), reviewed=False, re
 
     if not reset:
         # The app goes first: if it can't be moved, its settings stay where they are.
+        prompt = "Burrow needs your password to uninstall {}.".format(name)
         if app_needs_root:
-            failed_app = engine.admin_trash([app_path], label, batch, prompt="Burrow needs your password to uninstall {}.".format(name))
+            failed_app = engine.admin_trash([app_path], label, batch, prompt=prompt)
         else:
             failed_app = engine.trash_paths([app_path], finder_fallback=False, label=label, batch_id=batch)
+            if failed_app:  # macOS refused (permissions inside the app): try again as administrator
+                failed_app = engine.admin_trash(failed_app, label, batch, prompt=prompt)
         if failed_app:
             return "Couldn't move {}.app to the Trash, so its files were left alone".format(name)
 
     user_paths = [r["path"] for r in residuals if r not in root_items and os.path.lexists(r["path"])]
     failed = engine.trash_paths(user_paths, finder_fallback=False, label=label, batch_id=batch)
+    # Anything macOS refused to move for us goes through the password prompt with the system items
+    root_items += [r for r in residuals if r["path"] in failed]
+    failed = []
     if root_items:
         import shlex
         daemons = [r["path"] for r in root_items if "/LaunchDaemons/" in r["path"] and r["path"].endswith(".plist")]

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.1
+
+- **Uninstall:** apps installed as the system (root), such as MetaTrader 5, now ask for your password instead of failing with “Couldn't move … to the Trash”. If macOS refuses to move anything else, Burrow retries it through the password prompt. App updates benefit from the same fix.
+- **Touch ID:** when Touch ID for sudo is on (`butouchid`), Burrow's administrator prompts use Touch ID instead of your password. If Touch ID is cancelled or not recognised, the password prompt appears as before.
+
 ## 1.4.0
 
 - **Uninstaller window** in Burrow Companion: every app with its size and when it was last opened (filter by Unused or Largest), everything it installed with a checkbox to keep any item, the developer's own uninstaller and system extensions when there are any, and Uninstall, Reset and Undo. It uses the same engine as `buuninstall`, and items you keep are shared with Alfred.

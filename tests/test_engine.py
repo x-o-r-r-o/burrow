@@ -474,3 +474,54 @@ class SmallHelpersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NeedsRootTest(unittest.TestCase):
+    def test_folder_we_cant_write_needs_password(self):
+        import shutil
+        root = tempfile.mkdtemp()
+        try:
+            app = os.path.join(root, "Locked.app")
+            os.makedirs(os.path.join(app, "Contents"))
+            self.assertFalse(engine.needs_root(app))
+            os.chmod(app, 0o555)  # like an app installed as root: readable, not writable by us
+            self.assertTrue(engine.needs_root(app))
+            f = os.path.join(root, "file")
+            open(f, "w").close()
+            os.chmod(f, 0o444)  # a read-only file can still be moved
+            self.assertFalse(engine.needs_root(f))
+        finally:
+            os.chmod(os.path.join(root, "Locked.app"), 0o755)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_root_owned_app(self):
+        if os.path.isdir("/System/Applications/Calculator.app"):
+            self.assertTrue(engine.needs_root("/System/Applications/Calculator.app"))
+
+
+class TouchIDAdminTest(unittest.TestCase):
+    def setUp(self):
+        self.real = (engine.touchid_status, engine.subprocess.run)
+
+    def tearDown(self):
+        engine.touchid_status, engine.subprocess.run = self.real
+
+    def fake_sudo(self, stdout, code=0):
+        class R:
+            returncode = code
+        R.stdout, R.stderr = stdout.encode(), b""
+        engine.subprocess.run = lambda *a, **k: R
+
+    def test_off_uses_password_prompt(self):
+        engine.touchid_status = lambda: {"enabled": False}
+        self.assertIsNone(engine._sudo_with_touchid("true"))
+
+    def test_authorized_runs_script(self):
+        engine.touchid_status = lambda: {"enabled": True}
+        self.fake_sudo(engine.SUDO_AUTHORIZED + "\nmoved\n")
+        self.assertEqual(engine._sudo_with_touchid("true"), (True, "moved"))
+
+    def test_not_authorized_falls_back(self):
+        engine.touchid_status = lambda: {"enabled": True}
+        self.fake_sudo("", code=1)  # Touch ID cancelled: sudo stopped before running anything
+        self.assertIsNone(engine._sudo_with_touchid("true"))

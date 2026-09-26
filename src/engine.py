@@ -634,9 +634,35 @@ def _same_batch(a, b):
     return a["time"] == b["time"] and a["label"] == b["label"]
 
 
+SUDO_AUTHORIZED = "__burrow_authorized__"
+
+
+def _sudo_with_touchid(script):
+    """Run a script as root through sudo when Touch ID for sudo is turned on. macOS's
+    administrator prompt only offers Touch ID to Apple's own apps; sudo's Touch ID
+    module has no such rule. Returns (ok, output), or None when sudo couldn't
+    authenticate (Touch ID off, cancelled or not recognised), so the password prompt is used."""
+    try:
+        if not touchid_status()["enabled"]:
+            return None
+        res = subprocess.run(["/usr/bin/sudo", "/bin/sh", "-c", "echo " + SUDO_AUTHORIZED + "; " + script],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = res.stdout.decode("utf-8", "replace")
+    if not out.startswith(SUDO_AUTHORIZED):
+        return None  # never got past authentication: nothing ran
+    out = out[len(SUDO_AUTHORIZED):].lstrip("\n")
+    return res.returncode == 0, (out + res.stderr.decode("utf-8", "replace")).strip()
+
+
 def run_as_admin(script, prompt):
-    """Run a shell script as root via the standard macOS password prompt.
+    """Run a shell script as root: with Touch ID when it's turned on for sudo,
+    otherwise with the standard macOS password prompt.
     Returns (ok, output). ok is None when the user cancelled."""
+    via_touchid = _sudo_with_touchid(script)
+    if via_touchid is not None:
+        return via_touchid
     res = subprocess.run(
         ["/usr/bin/osascript", "-e", "on run argv", "-e", "do shell script (item 1 of argv) with prompt (item 2 of argv) with administrator privileges", "-e", "end run", script, prompt],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -2689,9 +2715,22 @@ def _pid_alive(pid):
 
 
 def needs_root(path):
-    """Moving `path` needs admin rights (its folder isn't writable by us)."""
-    parent = os.path.dirname(path.rstrip("/"))
-    return not os.access(parent, os.W_OK)
+    """Moving `path` needs admin rights: the folder it's in isn't writable by us, it's
+    a folder we can't write to (moving a folder rewrites it, so an app installed as
+    root can't be moved even from a writable /Applications), or it sits in a sticky
+    folder and belongs to someone else."""
+    import stat
+    p = path.rstrip("/")
+    parent = os.path.dirname(p)
+    if not os.access(parent, os.W_OK):
+        return True
+    try:
+        st, pst = os.lstat(p), os.stat(parent)
+    except OSError:
+        return False
+    if stat.S_ISDIR(st.st_mode) and not os.access(p, os.W_OK):
+        return True
+    return bool(pst.st_mode & stat.S_ISVTX) and st.st_uid != os.getuid()
 
 
 def admin_trash(paths, label, batch_id=None, prompt=None, before=(), after=()):

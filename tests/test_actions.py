@@ -177,6 +177,26 @@ class ActionTest(unittest.TestCase):
         self.assertIn("Put back 1 item", msg)
         self.assertTrue(os.path.exists(f))
 
+    def test_refused_app_move_retries_with_password(self):
+        app, leftovers = self.make_app()
+        calls = []
+        real_trash, real_admin = engine.trash_paths, engine.admin_trash
+
+        def refuse_app(paths, **k):
+            return [p for p in paths if p == app] or real_trash(paths, **k)
+
+        def admin(paths, label, batch_id=None, **k):
+            calls.append(list(paths))
+            return real_trash(paths, finder_fallback=False, label=label, batch_id=batch_id)
+        engine.trash_paths, engine.admin_trash = refuse_app, admin
+        try:
+            msg = burrow.uninstall(app, NAME, 0, reviewed=True)
+        finally:
+            engine.trash_paths, engine.admin_trash = real_trash, real_admin
+        self.assertEqual(calls[0], [app])
+        self.assertIn("uninstalled", msg)
+        self.assertFalse(os.path.exists(app))
+
 
 if __name__ == "__main__":
     unittest.main()

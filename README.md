@@ -142,7 +142,7 @@ Processes owned by another user (🔒) ask for your password through the standar
 * `bustartup` List launch agents and daemons, and remove ones left behind by deleted apps.
 * `bupurge` Find `node_modules`, `dist`, `target`, `venv`, `Pods` and similar folders in projects you haven't touched lately. A folder only counts when its project file proves what it is (for example `dist` needs a `package.json`).
 * `buinstallers` Find `.dmg`, `.pkg` and `.iso` files.
-* `butouchid` Turn Touch ID for `sudo` on or off.
+* `butouchid` Turn Touch ID for `sudo` on or off. When it's on, Burrow uses Touch ID for its own administrator prompts too (removing system files, root-owned apps, other users' processes). macOS's standard prompt only offers Touch ID to Apple's own apps, so without it Burrow asks for your password.
 * `bumenu` Open Burrow Companion (below).
 
 Open any command from other apps and scripts with `alfred://runtrigger/io.github.burrow-alfred/open/?argument=clean` (or `status`, `updates`, …).

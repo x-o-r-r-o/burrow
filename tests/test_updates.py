@@ -35,6 +35,9 @@ class VersionTest(unittest.TestCase):
         self.assertTrue(updates.newer("v3.6.6-8b85519e", "3.6.4"))
         self.assertTrue(updates.newer("5.3.2,1234", "5.3.1"))
         self.assertFalse(updates.newer("", "1.0"))
+        self.assertTrue(updates.newer("2.0.0-rc.1", "2.0.0-beta.2"))
+        self.assertTrue(updates.newer("6.1.0-2", "6.1.0-1"))
+        self.assertTrue(updates.newer("2024.10", "2024.9"))
 
 
 class SourcesTest(unittest.TestCase):
@@ -114,6 +117,25 @@ class InstallSafetyTest(unittest.TestCase):
         u["url"] = "http://example.com/App.zip"
         with self.assertRaisesRegex(updates.UpdateError, "HTTPS"):
             updates.prepare(u)
+
+    def test_rejects_update_for_newer_macos(self):
+        updates.signing = lambda p: (True, "TEAMAAAAAA", "x")
+        with open(os.path.join(self.new_app, "Contents", "Info.plist"), "rb") as f:
+            info = plistlib.load(f)
+        info["LSMinimumSystemVersion"] = "99.0"
+        with open(os.path.join(self.new_app, "Contents", "Info.plist"), "wb") as f:
+            plistlib.dump(info, f)
+        with self.assertRaisesRegex(updates.UpdateError, "needs macOS 99.0"):
+            updates.prepare(self.update())
+
+    def test_one_install_per_app_at_a_time(self):
+        engine.CACHE_DIR = tempfile.mkdtemp()
+        held = updates._AppLock("/Applications/Same.app")
+        try:
+            with self.assertRaisesRegex(updates.UpdateError, "already being updated"):
+                updates._AppLock("/Applications/Same.app")
+        finally:
+            held.release()
 
     def test_accepts_matching_update(self):
         updates.signing = lambda p: (True, "TEAMAAAAAA", "x")

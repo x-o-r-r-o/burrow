@@ -49,6 +49,7 @@ ARCH = platform.machine()  # arm64 / x86_64
 
 
 PRERELEASE_RE = re.compile(r"^[-._ ]?(alpha|beta|preview|pre|rc|dev|a|b)\.?(\d*)", re.I)
+PRERELEASE_RANK = {"dev": 0, "alpha": 1, "a": 1, "beta": 2, "b": 2, "pre": 3, "preview": 3, "rc": 4}
 
 
 def version_key(v):
@@ -59,8 +60,13 @@ def version_key(v):
     if not m:
         return None
     nums = [int(x) for x in m.group(1).split(".")]
-    pre = PRERELEASE_RE.match(m.group(2))
-    rank = (0, int(pre.group(2) or 0)) if pre else (1, 0)
+    rest = m.group(2)
+    pre = PRERELEASE_RE.match(rest)
+    if pre:
+        rank = (0, PRERELEASE_RANK.get(pre.group(1).lower(), 0), int(pre.group(2) or 0))
+    else:
+        rev = re.match(r"^-(\d+)$", rest)  # "6.1.0-2": a packaging revision
+        rank = (1, int(rev.group(1)) if rev else 0, 0)
     return nums, rank
 
 
@@ -110,6 +116,7 @@ def app_info(path):
         "build": str(info.get("CFBundleVersion") or ""),
         "feed": info.get("SUFeedURL") if isinstance(info.get("SUFeedURL"), str) else None,
         "mas": wrapped or os.path.exists(os.path.join(path, "Contents", "_MASReceipt", "receipt")),
+        "ios": wrapped,
         "electron": os.path.exists(os.path.join(path, "Contents", "Resources", "app-update.yml")),
     }
 
@@ -227,10 +234,61 @@ def check_app_store(apps):
         if newer(r.get("version"), a["version"]):
             out[a["path"]] = {"version": r["version"], "source": "App Store", "installable": False,
                               "url": "macappstore://apps.apple.com/app/id{}".format(r.get("trackId")),
+                              "adam_id": r.get("trackId"), "ios": a.get("ios", False),
                               "notes": r.get("trackViewUrl"), "release_notes": (r.get("releaseNotes") or "")[:600]}
         else:
             out[a["path"]] = {"current": True}
     return out
+
+
+def mas_path():
+    """The mas command-line tool for the App Store, if installed."""
+    for p in ("/opt/homebrew/bin/mas", "/usr/local/bin/mas"):
+        if os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def app_store_installable(u):
+    """App Store updates are installable once mas is installed (not iPhone/iPad apps)."""
+    return u.get("source") == "App Store" and bool(u.get("adam_id")) and not u.get("ios") and bool(mas_path())
+
+
+def install_mas():
+    """Install mas with Homebrew so App Store updates can be installed from Burrow."""
+    brew = brew_path()
+    if not brew:
+        raise UpdateError("Homebrew isn't installed (see brew.sh)")
+    res = subprocess.run([brew, "install", "mas"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900,
+                         env=dict(os.environ, HOMEBREW_NO_AUTO_UPDATE="1", PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"))
+    if res.returncode != 0 or not mas_path():
+        tail = res.stdout.decode("utf-8", "replace").strip().splitlines()[-1:] or ["brew failed"]
+        raise UpdateError("couldn't install mas: " + tail[0][:150])
+    return "mas installed. App Store updates can now be installed from Burrow"
+
+
+def install_app_store(updates_list):
+    """Update App Store apps with mas, all with ONE password prompt (mas needs admin
+    rights and your Apple Account signed in to the App Store). Returns (done, failed)."""
+    import shlex
+    mas = mas_path()
+    if not mas:
+        raise UpdateError("mas isn't installed")
+    todo = [u for u in updates_list if app_store_installable(u)]
+    if not todo:
+        return [], []
+    script = "; ".join("{} update {} >/dev/null 2>&1; echo {}:$?".format(shlex.quote(mas), int(u["adam_id"]), int(u["adam_id"])) for u in todo)
+    ok, out = engine.run_as_admin(script, "Burrow needs your password to install App Store updates.")
+    if ok is None:
+        raise UpdateError("cancelled")
+    done, failed = [], []
+    for u in todo:
+        now = app_info(u["path"])["version"]
+        if not newer(u["version"], now):
+            done.append("{} updated to {}".format(u["name"], now))
+        else:
+            failed.append("{}: the App Store didn't update it (is your Apple Account signed in, and did it buy this app?)".format(u["name"]))
+    return done, failed
 
 
 def brew_path():
@@ -382,6 +440,8 @@ def visible_updates(result=None):
             continue
         if not os.path.exists(u["path"]) or not newer(u["version"], app_info(u["path"])["version"]):
             continue  # updated since the check
+        if u.get("source") == "App Store":
+            u = dict(u, installable=app_store_installable(u))
         out.append(u)
     return out
 
@@ -415,6 +475,28 @@ def signing(app_path):
     ident = re.search(r"Identifier=(\S+)", out)
     team = team.group(1) if team and team.group(1) != "not" else None
     return ok, team, ident.group(1) if ident else None
+
+
+def check_runs_here(app_path):
+    """The new version must support this macOS and this Mac's processor."""
+    try:
+        with open(engine.app_info_plist(app_path), "rb") as f:
+            info = plistlib.load(f)
+    except Exception:  # noqa: BLE001
+        return
+    min_os = info.get("LSMinimumSystemVersion")
+    if min_os and newer(str(min_os), MAC_VERSION):
+        raise UpdateError("the new version needs macOS {} or later".format(min_os))
+    exe = info.get("CFBundleExecutable")
+    if exe:
+        binary = os.path.join(app_path, "Contents", "MacOS", exe)
+        archs = subprocess.run(["/usr/bin/lipo", "-archs", binary], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().split()
+        if archs and ARCH not in archs and not (ARCH == "arm64" and "x86_64" in archs and rosetta_installed()):
+            raise UpdateError("the new version doesn't run on this Mac's processor ({})".format(", ".join(archs)))
+
+
+def rosetta_installed():
+    return os.path.exists("/Library/Apple/usr/libexec/oah/libRosettaRuntime")
 
 
 def gatekeeper_ok(app_path):
@@ -524,7 +606,11 @@ def prepare(update, app=None, log=lambda msg: None):
         shutil.rmtree(work, ignore_errors=True)
         raise UpdateError("download failed: {}".format(e))
 
-    staged, cleanup = extract_app(archive, work, app["bundle_id"])
+    try:
+        staged, cleanup = extract_app(archive, work, app["bundle_id"])
+    except Exception:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
     try:
         ok, team, _ = signing(staged)
         if not ok:
@@ -538,6 +624,7 @@ def prepare(update, app=None, log=lambda msg: None):
             raise UpdateError("the download isn't newer than what's installed")
         if gatekeeper_ok(app["path"]) and not gatekeeper_ok(staged):
             raise UpdateError("macOS Gatekeeper rejects the new version (not notarized by Apple)")
+        check_runs_here(staged)
 
     except Exception:
         cleanup()
@@ -545,11 +632,41 @@ def prepare(update, app=None, log=lambda msg: None):
     return staged, new, cleanup
 
 
+class _AppLock:
+    def __init__(self, path):
+        import fcntl
+        self.fd = open(os.path.join(engine.CACHE_DIR, ".update-" + hashlib.sha1(path.encode()).hexdigest()[:12] + ".lock"), "w")
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.fd.close()
+            raise UpdateError("it's already being updated")
+
+    def release(self):
+        import fcntl
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        self.fd.close()
+
+
 def install(update, relaunch=True, log=lambda msg: None):
     """Download, verify and install one update. Returns a message; raises UpdateError."""
+    os.makedirs(engine.CACHE_DIR, exist_ok=True)
+    lock = _AppLock(update["path"])
+    try:
+        return _install(update, relaunch, log)
+    finally:
+        lock.release()
+
+
+def _install(update, relaunch=True, log=lambda msg: None):
     app = app_info(update["path"])
     if not os.path.exists(app["path"]):
         raise UpdateError("the app is no longer installed")
+    if update["source"] == "App Store":
+        done, failed = install_app_store([update])
+        if failed:
+            raise UpdateError(failed[0].split(": ", 1)[1])
+        return done[0]
     if update["source"] == "Homebrew":
         brew = brew_path()
         res = subprocess.run([brew, "upgrade", "--cask", update["token"]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -567,20 +684,33 @@ def install(update, relaunch=True, log=lambda msg: None):
         label = "Update {} to {}".format(app["name"], new["version"])
         batch = engine.new_batch_id()
         # Old version to the Trash (undoable = roll back), new version into place
-        if engine.needs_root(app["path"]):
+        needs_root = engine.needs_root(app["path"])
+        if needs_root:
             failed = engine.admin_trash([app["path"]], label, batch, prompt="Burrow needs your password to update {}.".format(app["name"]))
         else:
             failed = engine.trash_paths([app["path"]], finder_fallback=False, label=label, batch_id=batch)
         if failed:
             raise UpdateError("couldn't move the old version aside")
+        record = engine.find_trash_batch(batch)
+        if not record:
+            # Moved but not tracked (should never happen): find it in the Trash and track it
+            guess = os.path.join(HOME, ".Trash", os.path.basename(app["path"]))
+            if os.path.exists(guess):
+                engine.record_trash_batch(label, {app["path"]: guess}, batch)
+                record = engine.find_trash_batch(batch)
+            if not record:
+                raise UpdateError("couldn't keep track of the old version; look for it in the Trash")
         res = subprocess.run(["/usr/bin/ditto", staged, app["path"]], stderr=subprocess.PIPE, timeout=600)
-        if res.returncode != 0 and engine.needs_root(app["path"]):
+        if res.returncode != 0 and needs_root:
             import shlex
             engine.run_as_admin("/usr/bin/ditto {} {}".format(shlex.quote(staged), shlex.quote(app["path"])),
                                 "Burrow needs your password to update {}.".format(app["name"]))
-        if not os.path.exists(os.path.join(app["path"], "Contents")) and not os.path.exists(os.path.join(app["path"], "Wrapper")):
-            # Put the old version back rather than leave nothing
-            engine.undo_trash_batch(engine.last_trash_batch())
+        installed = app_info(app["path"])
+        if installed["bundle_id"] != app["bundle_id"] or not signing(app["path"])[0]:
+            # A partial or broken copy: remove it and put the old version back
+            if os.path.lexists(app["path"]):
+                engine.trash_paths([app["path"]], finder_fallback=False)
+            engine.undo_trash_batch(record)
             raise UpdateError("installing failed, so the old version was put back")
         mark_replacement(batch)
         if was_running and relaunch:
@@ -612,11 +742,12 @@ WF_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def burrow_version():
+    """This Burrow's version, or None when running from a source checkout (no info.plist)."""
     try:
         with open(os.path.join(WF_DIR, "info.plist"), "rb") as f:
-            return str(plistlib.load(f).get("version") or "0")
+            return str(plistlib.load(f).get("version") or "") or None
     except Exception:  # noqa: BLE001
-        return "0"
+        return None
 
 
 def check_self():
@@ -632,7 +763,7 @@ def check_self():
     except Exception:  # noqa: BLE001 — offline, rate-limited, or no release yet
         return None
     current = burrow_version()
-    if latest.get("url") and newer(latest.get("version"), current):
+    if current and latest.get("url") and newer(latest.get("version"), current):
         return dict(latest, installed=current)
     return None
 
@@ -655,7 +786,7 @@ def install_self(update):
         info = plistlib.loads(z.read("info.plist"))
     if info.get("bundleid") != engine.BUNDLE_ID:
         raise UpdateError("the download isn't Burrow")
-    if not newer(info.get("version"), burrow_version()):
+    if not burrow_version() or not newer(info.get("version"), burrow_version()):
         raise UpdateError("the download isn't newer than this Burrow")
     subprocess.run(["/usr/bin/open", path])
     return path
@@ -727,7 +858,7 @@ def auto(mode):
     installed, failed = [], []
     if mode == "install":
         for u in ups:
-            if u.get("installable") and u["source"] != "Homebrew" and not engine.app_is_running(u["path"]):
+            if u.get("installable") and u["source"] not in ("Homebrew", "App Store") and not engine.app_is_running(u["path"]):
                 try:
                     install(u, relaunch=False)
                     installed.append(u["name"])
@@ -742,9 +873,112 @@ def auto(mode):
     notify(" · ".join(parts))
 
 
+def history():
+    """Past updates that can still be rolled back (their old version is in the Trash)."""
+    out = []
+    for b in reversed(load_state(engine.TRASH_HISTORY).get("batches", [])):
+        if b.get("label", "").startswith("Update ") and any(os.path.lexists(i["to"]) for i in b["items"]):
+            out.append({"id": b.get("id"), "label": b["label"], "time": b["time"]})
+    return out
+
+
+def window_state(check=False):
+    """Everything the updater window shows, as JSON-ready data."""
+    result = check_all() if check else load_state(RESULTS)
+    ups = visible_updates(result)
+    ignore = load_state(IGNORE)
+    return {
+        "checked": result.get("time"), "current": result.get("current", 0), "unknown": result.get("unknown", 0),
+        "updates": [dict(u, size=None) for u in ups],
+        "ignored": [{"bundle_id": k, "rule": v} for k, v in sorted(ignore.items())],
+        "history": history(),
+        "self": check_self(),
+        "mas": bool(mas_path()), "brew": bool(brew_path()),
+        "mode": os.environ.get("auto_updates") or _alfred_setting("auto_updates") or "notify",
+    }
+
+
+def _alfred_setting(name):
+    """A workflow setting from Alfred's prefs.plist (for runs outside Alfred)."""
+    try:
+        with open(os.path.join(WF_DIR, "prefs.plist"), "rb") as f:
+            return plistlib.load(f).get(name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def cli(argv):
+    """JSON commands for the updater window. Progress is printed as JSON lines."""
+    def say(obj):
+        print(json.dumps(obj), flush=True)
+    cmd = argv[0] if argv else ""
+    if cmd == "state":
+        say(window_state(check="--check" in argv))
+    elif cmd == "install-mas":
+        try:
+            say({"done": install_mas()})
+        except Exception as e:  # noqa: BLE001
+            say({"error": str(e)})
+    elif cmd == "install":
+        result = load_state(RESULTS)
+        store = [u for u in visible_updates(result) if u["path"] in argv[1:] and u.get("source") == "App Store" and u.get("installable")]
+        if store:
+            for u in store:
+                say({"path": u["path"], "stage": "working", "message": "Updating from the App Store…"})
+            try:
+                done, failed = install_app_store(store)
+                for u in store:
+                    msg = next((d for d in done if d.startswith(u["name"] + " ")), None)
+                    say({"path": u["path"], "done": msg} if msg else {"path": u["path"], "error": next((f.split(": ", 1)[1] for f in failed if f.startswith(u["name"] + ":")), "not updated")})
+            except Exception as e:  # noqa: BLE001
+                for u in store:
+                    say({"path": u["path"], "error": str(e)})
+        for path in [p for p in argv[1:] if p not in {u["path"] for u in store}]:
+            u = next((x for x in visible_updates(result) if x["path"] == path), None)
+            if not u:
+                say({"path": path, "error": "no update found for this app"})
+                continue
+            try:
+                say({"path": path, "stage": "downloading"})
+                msg = install(u, log=lambda m, p=path: say({"path": p, "stage": "working", "message": m}))
+                say({"path": path, "done": msg})
+            except Exception as e:  # noqa: BLE001
+                say({"path": path, "error": str(e)})
+    elif cmd == "skip":
+        set_ignore(argv[1], argv[2])
+        say({"ok": True})
+    elif cmd == "ignore":
+        set_ignore(argv[1], "*")
+        say({"ok": True})
+    elif cmd == "unignore":
+        set_ignore(argv[1], None)
+        say({"ok": True})
+    elif cmd == "rollback":
+        batch = next((b for b in load_state(engine.TRASH_HISTORY).get("batches", []) if b.get("id") == argv[1]), None)
+        if not batch:
+            say({"error": "that update can't be rolled back any more"})
+        else:
+            restored, skipped = engine.undo_trash_batch(batch)
+            say({"ok": not skipped, "restored": len(restored), "skipped": len(skipped)})
+    elif cmd == "self-update":
+        up = check_self()
+        if not up:
+            say({"error": "Burrow is up to date"})
+        else:
+            try:
+                install_self(up)
+                say({"done": "Click Update in Alfred's window to finish"})
+            except Exception as e:  # noqa: BLE001
+                say({"error": str(e)})
+    else:
+        say({"error": "unknown command"})
+
+
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "auto":
+    if len(sys.argv) > 1 and sys.argv[1] == "cli":
+        cli(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "auto":
         auto(sys.argv[2] if len(sys.argv) > 2 else "notify")
     elif len(sys.argv) > 1 and sys.argv[1] == "check":
         r = check_all()

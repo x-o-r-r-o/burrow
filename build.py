@@ -29,6 +29,7 @@ CMD, ALT, CTRL = 1048576, 524288, 262144
 SCRIPT_FILTERS = [
     ("hub", "bu", "Burrow", "All Burrow commands", "status", "Loading…"),
     ("status", "bustatus", "System Status", "Health, CPU, memory, disk, battery and network", "status", "Reading system status…"),
+    ("browsers", "bubrowsers", "Browsers", "Clear history, cache, cookies and more, or reset a browser", "browser", "Finding browsers…"),
     ("updates", "buupdates", "App Updates", "Check your apps for new versions and install them safely", "update", "Checking…"),
     ("clean", "buclean", "Clean System", "Preview and remove caches, logs and temporary files", "clean", "Scanning…"),
     ("optimize", "buoptimize", "Optimize System", "Flush DNS, rebuild databases, refresh services", "optimize", "Checking…"),
@@ -289,11 +290,12 @@ def main():
     os.makedirs(BUILD)
     os.makedirs(DIST, exist_ok=True)
 
-    for name in ("burrow.py", "engine.py", "updates.py", "run.sh"):
+    for name in ("burrow.py", "engine.py", "updates.py", "browsers.py", "run.sh"):
         shutil.copy(os.path.join(SRC, name), BUILD)
     os.chmod(os.path.join(BUILD, "run.sh"), 0o755)
     build_swift(os.path.join(ROOT, "tools", "menubar", "BurrowMenu.swift"), os.path.join(BUILD, "bin", "BurrowMenu"))
     build_swift(os.path.join(ROOT, "tools", "trash", "BurrowTrash.swift"), os.path.join(BUILD, "bin", "BurrowTrash"))
+    build_swift(os.path.join(ROOT, "tools", "window", "BurrowWindow.swift"), os.path.join(BUILD, "bin", "BurrowWindow"))
     with open(os.path.join(BUILD, "bin", ".stamp"), "w") as f:
         f.write("{}-{}\n".format(VERSION, uuid.uuid4().hex[:12]))
     shutil.copytree(os.path.join(SRC, "icons"), os.path.join(BUILD, "icons"), ignore=shutil.ignore_patterns(".*", "__pycache__"))

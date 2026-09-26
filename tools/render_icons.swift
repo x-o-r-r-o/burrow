@@ -34,6 +34,7 @@ let specs: [(String, String, [String])] = [
     ("dupes", "doc.on.doc.fill", ["purple"]),
     ("startup", "power.circle.fill", ["blue"]),
     ("undo", "arrow.uturn.backward.circle.fill", ["blue"]),
+    ("browser", "globe", ["blue"]),
     ("process", "gearshape.fill", ["gray"]),
     ("bluetooth", "dot.radiowaves.left.and.right", ["blue"]),
     ("info", "info.circle.fill", ["gray"]),

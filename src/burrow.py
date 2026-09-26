@@ -43,6 +43,7 @@ DEFAULT_KEYWORDS = {
     "startup": "bustartup",
     "dupes": "budupes",
     "updates": "buupdates",
+    "browsers": "bubrowsers",
 }
 
 
@@ -372,6 +373,7 @@ HUB = [
     ("status", "System Status", "Health score, CPU, memory, disk, battery and network", "status"),
     ("updates", "App Updates", "Check your apps for new versions and install them safely", "update"),
     ("clean", "Clean System", "Move caches, logs and temporary files to the Trash", "clean"),
+    ("browsers", "Browsers", "Clear history, cache, cookies and more, or reset a browser", "browser"),
     ("optimize", "Optimize System", "Flush DNS, rebuild databases, refresh services", "optimize"),
     ("uninstall", "Uninstall App", "Remove apps and their leftover files", "uninstall"),
     ("analyze", "Analyze Disk", "Browse folders sorted by size", "analyze"),
@@ -1495,6 +1497,9 @@ def cmd_updates(query):
         items.append(mine)
     if running:
         items.append(item("Checking for Updates… {}s".format(elapsed(job)), "Showing the last results meanwhile", icon("search"), valid=False))
+    win = window_item("updates", "Open the Updates Window", "Release notes, update all, roll back, with progress for each app")
+    if win and not query:
+        items.append(win)
     if ups:
         items.append(item(
             "{} Available".format(plural(len(ups), "Update")),
@@ -1511,11 +1516,25 @@ def cmd_updates(query):
             icon("check" if not failure else "error"), act("rescan", KEYWORDS["updates"] + " ", kind="updates"),
         ))
 
+    store_waiting = [u for u in ups if u["source"] == "App Store" and not u.get("installable") and not u.get("ios")]
+    if store_waiting and not query:
+        if updates.brew_path():
+            items.append(item(
+                "Update App Store Apps From Burrow Too",
+                "Installs the free mas tool with Homebrew · then {} can update here · ↩ Install".format(plural(len(store_waiting), "app")),
+                icon("download"), act("install_mas"),
+            ))
+        else:
+            items.append(item("App Store Apps Update in the App Store", "Install Homebrew (brew.sh) to let Burrow update them too",
+                              icon("info"), act("open", "https://brew.sh")))
     for u in ups:
         if not matches(query, u["name"], u["source"]):
             continue
-        if u["source"] == "App Store":
-            how = "↩ Open in the App Store"
+        if u["source"] == "App Store" and u.get("installable"):
+            how = "↩ Update (asks for your password)"
+            action = act("update_install", "", paths=[u["path"]])
+        elif u["source"] == "App Store":
+            how = "↩ Open in the App Store" + (" (iPhone/iPad app)" if u.get("ios") else "")
             action = act("open", u["url"])
         elif u.get("installable"):
             how = "↩ Update" if u["source"] != "Homebrew" else "↩ Update with Homebrew"
@@ -1556,6 +1575,25 @@ def cmd_updates(query):
     emit(items, rerun=0.5 if running else None)
 
 
+WINDOW_BIN = os.path.join(WF_DIR, "bin", "BurrowWindow")
+
+
+def open_window(section):
+    """Open (or bring forward) Burrow's window on a section."""
+    try:
+        os.chmod(WINDOW_BIN, 0o755)
+    except OSError:
+        pass
+    subprocess.Popen([WINDOW_BIN, WF_DIR, section], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True, env=dict(os.environ, alfred_workflow_cache=CACHE_DIR))
+
+
+def window_item(section, title, subtitle):
+    if not os.path.exists(WINDOW_BIN):
+        return None
+    return item(title, subtitle, icon("menubar"), act("window", section))
+
+
 def install_updates(paths):
     import updates
     result = engine.load_state(updates.RESULTS)
@@ -1565,12 +1603,22 @@ def install_updates(paths):
     names = "\n".join("• {} {} → {} ({})".format(u["name"], u["installed"], u["version"], u["source"]) for u in todo)
     running = [u["name"] for u in todo if engine.app_is_running(u["path"])]
     msg = "Burrow checks every download (same app, same developer, valid signature) before installing it. The old version goes to the Trash, so you can undo.\n\n" + names
+    if any(u["source"] == "App Store" for u in todo):
+        msg += "\n\nApp Store updates come from Apple through your signed-in Apple Account, and ask for your password once."
     if running:
         msg += "\n\n{} will be quit and reopened.".format(", ".join(running))
     if not confirm("Install {}?".format(plural(len(todo), "update")), msg, "Install"):
         return None
     done, failed = [], []
-    for u in todo:
+    store = [u for u in todo if u["source"] == "App Store"]
+    if store:  # all App Store updates share one password prompt
+        try:
+            d, f = updates.install_app_store(store)
+            done += d
+            failed += f
+        except Exception as e:  # noqa: BLE001
+            failed += ["{}: {}".format(u["name"], e) for u in store]
+    for u in [u for u in todo if u["source"] != "App Store"]:
         try:
             done.append(updates.install(u, log=notify))
         except Exception as e:  # noqa: BLE001
@@ -1583,6 +1631,231 @@ def install_updates(paths):
     if failed:
         parts.append("Not updated — " + "; ".join(failed[:3]))
     return " · ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# bubrowsers — Browser cleaning and reset
+# ---------------------------------------------------------------------------
+
+BROWSER_CHOICES = "browser-choices.json"
+DEFAULT_BROWSER_CATEGORIES = ["cache", "history", "downloads"]
+FULL_DISK_ACCESS = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+
+
+def browser_choice(bid):
+    import browsers
+    c = engine.load_state(BROWSER_CHOICES).get(bid) or {}
+    cats = [k for k in c.get("categories", DEFAULT_BROWSER_CATEGORIES) if k in browsers.CATEGORY_KEYS]
+    return {"categories": cats, "range": c.get("range", "all"), "profile": c.get("profile", "all")}
+
+
+def set_browser_choice(bid, **changes):
+    def change(d):
+        cur = d.get(bid) or {}
+        cur.update(changes)
+        d[bid] = cur
+        return d
+    engine.update_state(BROWSER_CHOICES, change)
+
+
+def find_browser(bid):
+    import browsers
+    return next((b for b in browsers.discover() if b["id"] == bid), None)
+
+
+def cmd_browsers(query):
+    import browsers
+    if query.startswith("="):
+        return browser_view(query[1:].strip())
+    found = browsers.discover()
+    items = []
+    if not found:
+        emit([item("No Browsers Found", "Burrow looks for Chromium, Firefox, Safari and Orion data", icon("check"), valid=False)])
+        return
+    closed = [b for b in found if not browsers.is_running(b) and (b["kind"] != "safari" or b.get("access"))]
+    win = window_item("browsers", "Open the Browsers Window", "Choose what to clean with switches, for every browser")
+    if win and not query:
+        items.append(win)
+    items.append(item(
+        "Clear the Cache of Every Closed Browser",
+        "{} · open browsers are skipped · ↩ Move to the Trash".format(", ".join(b["name"] for b in closed[:5]) or "none are closed"),
+        icon("clean"), act("browser_cache_all"), valid=bool(closed),
+    ))
+    for b in found:
+        if not matches(query, b["name"]):
+            continue
+        state = []
+        if not b["installed"]:
+            state.append("app not installed")
+        if browsers.is_running(b):
+            state.append("open")
+        if b["kind"] == "safari" and not b.get("access"):
+            items.append(item(
+                "Safari", "Needs Full Disk Access for Alfred · ↩ Open Privacy settings, then turn on Alfred",
+                file_icon(b["app"]), act("open", FULL_DISK_ACCESS),
+            ))
+            continue
+        cache = browsers.sizes(b)["cache"]
+        items.append(item(
+            b["name"],
+            " · ".join(x for x in [plural(len(b["profiles"]), "profile"), "cache " + format_bytes(cache) if cache else "", ", ".join(state),
+                                   "↩ Choose what to clean"] if x),
+            file_icon(b["app"]) if b.get("app") else icon("browser"),
+            valid=False, autocomplete="=" + b["id"],
+            mods={"cmd": mod("Reveal its data folder", act("reveal", b["root"]))},
+            uid="browser-" + b["id"],
+        ))
+    emit(items)
+
+
+def browser_view(bid):
+    import browsers
+    b = find_browser(bid)
+    items = [item("..", "All browsers", icon("back"), valid=False, autocomplete="")]
+    if not b:
+        emit(items + [item("Browser Not Found", "Its data may have been removed", icon("check"), valid=False)])
+        return
+    choice = browser_choice(bid)
+    ranges = dict((k, l) for k, l, _ in browsers.RANGES)
+    profiles = b["profiles"]
+    prof_ids = [p["id"] for p in profiles] if choice["profile"] == "all" else [choice["profile"]]
+    prof_label = "All profiles" if choice["profile"] == "all" or len(profiles) == 1 else next((p["name"] for p in profiles if p["id"] == choice["profile"]), "All profiles")
+    running = browsers.is_running(b)
+    labels = dict((k, l) for k, l, _, _ in browsers.CATEGORIES)
+    try:
+        preview = browsers.plan(b, prof_ids, choice["categories"], choice["range"])
+    except browsers.BrowserError as e:
+        emit(items + [item(str(e).split(".")[0], "↩ Open Privacy settings", icon("warning"), act("open", FULL_DISK_ACCESS))])
+        return
+    chosen = ", ".join(labels[c].lower() for c in choice["categories"]) or "nothing selected"
+    items.append(item(
+        "Clean {}  —  {}".format(b["name"], ranges[choice["range"]].lower()),
+        "{}{} · ↩ Clean".format("Quits it first · " if running else "", chosen),
+        file_icon(b["app"]) if b.get("app") else icon("browser"),
+        act("browser_clean", bid), valid=bool(choice["categories"]),
+        text={"largetype": "\n".join(preview["notes"]) or chosen},
+    ))
+    for key, label, ranged, desc in browsers.CATEGORIES:
+        on = key in choice["categories"]
+        items.append(item(
+            ("✓ " if on else "○ ") + label,
+            desc + (" · asks again before removing" if key == "passwords" else "") + " · ↩ " + ("Leave out" if on else "Include"),
+            icon("check" if on else "hidden"), act("browser_toggle", bid, category=key),
+        ))
+    order = [k for k, _, _ in browsers.RANGES]
+    nxt = order[(order.index(choice["range"]) + 1) % len(order)]
+    items.append(item("Time Range: " + ranges[choice["range"]], "↩ Change to “{}”".format(ranges[nxt]), icon("refresh"),
+                       act("browser_choice", bid, range=nxt)))
+    if len(profiles) > 1:
+        ids = ["all"] + [p["id"] for p in profiles]
+        nprof = ids[(ids.index(choice["profile"]) + 1) % len(ids)] if choice["profile"] in ids else "all"
+        nlabel = "All profiles" if nprof == "all" else next(p["name"] for p in profiles if p["id"] == nprof)
+        items.append(item("Profiles: " + prof_label, "↩ Change to “{}”".format(nlabel), icon("info"), act("browser_choice", bid, profile=nprof)))
+    for n in preview["notes"]:
+        items.append(item(n, "", icon("info"), valid=False))
+    if b["kind"] in ("chromium", "firefox"):
+        items.append(item("Reset Settings", "Default settings; extensions go to the Trash too · bookmarks, history and passwords stay · ↩ Reset",
+                          icon("refresh"), act("browser_reset", bid, full=False)))
+    if b["kind"] in ("chromium", "firefox", "orion"):
+        items.append(item("Full Reset", "Moves the whole {} to the Trash, like a fresh install · ↩ Reset".format("profile" if len(profiles) == 1 else "profiles selected"),
+                          icon("warning"), act("browser_reset", bid, full=True)))
+    emit(items)
+
+
+def quit_browser_if_needed(b, why):
+    import browsers
+    if not browsers.is_running(b):
+        return True
+    if not confirm("Quit {}?".format(b["name"]), "{} needs {} to be closed. Open tabs are restored next time unless you're also clearing sessions.".format(why, b["name"]), "Quit"):
+        return False
+    return engine.quit_app(b["app"], b.get("bundle_id"), wait=15)
+
+
+def browser_clean_action(bid):
+    import browsers
+    b = find_browser(bid)
+    if not b:
+        return "Browser not found"
+    choice = browser_choice(bid)
+    ranges = dict((k, l) for k, l, _ in browsers.RANGES)
+    labels = dict((k, l) for k, l, _, _ in browsers.CATEGORIES)
+    prof_ids = [p["id"] for p in b["profiles"]] if choice["profile"] == "all" else [choice["profile"]]
+    p = browsers.plan(b, prof_ids, choice["categories"], choice["range"])
+    listing = "\n".join("• " + labels[c] for c in choice["categories"])
+    msg = "From {} ({}):\n\n{}\n\nEverything goes to the Trash first, so you can undo.".format(
+        b["name"], ranges[choice["range"]].lower(), listing)
+    if p["notes"]:
+        msg += "\n\n" + "\n".join(p["notes"])
+    if not confirm("Clean {}?".format(b["name"]), msg, "Clean"):
+        return None
+    if "passwords" in choice["categories"] and not confirm(
+            "Remove saved passwords?", "Every password saved in {} ({}) will be removed. Make sure you can sign in without them, or have them in another password manager.".format(
+                b["name"], "all profiles" if choice["profile"] == "all" else "this profile"), "Remove Passwords"):
+        return None
+    if not quit_browser_if_needed(b, "Cleaning"):
+        return "{} is still open, so nothing was cleaned".format(b["name"])
+    try:
+        res = browsers.clean(b, prof_ids, choice["categories"], choice["range"])
+    except Exception as e:  # noqa: BLE001
+        return "Couldn't clean {}: {}".format(b["name"], e)
+    record_freed(res["freed"])
+    alfred_search(KEYWORDS["browsers"] + " =" + bid)
+    out = "{} cleaned".format(b["name"])
+    if res["freed"]:
+        out += " · {} moved to the Trash".format(format_bytes(res["freed"]))
+    if res["failed"]:
+        out += " · {} couldn't be moved".format(len(res["failed"]))
+    return out + " · undo with " + KEYWORDS["hub"]
+
+
+def browser_reset_action(bid, full):
+    import browsers
+    b = find_browser(bid)
+    if not b:
+        return "Browser not found"
+    choice = browser_choice(bid)
+    prof_ids = [p["id"] for p in b["profiles"]] if choice["profile"] == "all" else [choice["profile"]]
+    if full:
+        title = "Fully reset {}?".format(b["name"])
+        msg = ("Everything in {} goes to the Trash: bookmarks, history, passwords, extensions, cookies and settings. "
+               "It starts like a fresh install. If you sync, your data comes back when you sign in.\n\nYou can undo this with Undo in Burrow.").format(
+                   "the selected profile" if len(prof_ids) == 1 and len(b["profiles"]) > 1 else b["name"])
+    else:
+        title = "Reset {} settings?".format(b["name"])
+        msg = "Settings go back to their defaults and extensions move to the Trash with them (Undo brings both back). Bookmarks, history, passwords and cookies stay."
+    if not confirm(title, msg, "Reset"):
+        return None
+    if not quit_browser_if_needed(b, "Resetting"):
+        return "{} is still open, so nothing was reset".format(b["name"])
+    try:
+        res = browsers.reset(b, prof_ids, full)
+    except Exception as e:  # noqa: BLE001
+        return "Couldn't reset {}: {}".format(b["name"], e)
+    alfred_search(KEYWORDS["browsers"] + " ")
+    return "{} {} · undo with {}".format(b["name"], "fully reset" if full else "settings reset", KEYWORDS["hub"])
+
+
+def browser_cache_all():
+    import browsers
+    done, skipped, freed = [], [], 0
+    batch_label = "Clear browser caches"
+    for b in browsers.discover():
+        if browsers.is_running(b) or (b["kind"] == "safari" and not b.get("access")):
+            skipped.append(b["name"])
+            continue
+        try:
+            res = browsers.clean(b, [], ["cache"], "all", label=batch_label)
+            freed += res["freed"]
+            done.append(b["name"])
+        except Exception:  # noqa: BLE001
+            skipped.append(b["name"])
+    record_freed(freed)
+    msg = "Cleared the cache of {}".format(", ".join(done)) if done else "No closed browsers to clear"
+    if freed:
+        msg += " · {}".format(format_bytes(freed))
+    if skipped:
+        msg += " · skipped {} (open)".format(", ".join(skipped))
+    return msg
 
 
 # ---------------------------------------------------------------------------
@@ -1864,6 +2137,33 @@ def dispatch(action, target, p):
         except Exception as e:  # noqa: BLE001
             return "Couldn't update Burrow: {}".format(e)
         return "Downloaded and verified. Click Update in Alfred's window to finish"
+    elif action == "window":
+        open_window(target or "updates")
+    elif action == "browser_toggle":
+        cur = browser_choice(target)["categories"]
+        cat = p.get("category")
+        set_browser_choice(target, categories=[c for c in cur if c != cat] if cat in cur else cur + [cat])
+        alfred_search(KEYWORDS["browsers"] + " =" + target)
+    elif action == "browser_choice":
+        set_browser_choice(target, **{k: v for k, v in p.items() if k in ("range", "profile")})
+        alfred_search(KEYWORDS["browsers"] + " =" + target)
+    elif action == "browser_clean":
+        return browser_clean_action(target)
+    elif action == "browser_reset":
+        return browser_reset_action(target, bool(p.get("full")))
+    elif action == "browser_cache_all":
+        return browser_cache_all()
+    elif action == "install_mas":
+        import updates
+        if not confirm("Install mas?", "mas is a free, open-source command-line tool for the App Store (github.com/mas-cli/mas). Burrow installs it with Homebrew, then App Store updates can be installed from Burrow with your password.", "Install"):
+            return None
+        notify("Installing mas with Homebrew…")
+        try:
+            msg = updates.install_mas()
+        except Exception as e:  # noqa: BLE001
+            return "Couldn't install mas: {}".format(e)
+        alfred_search(KEYWORDS["updates"] + " ")
+        return msg
     elif action == "update_install":
         return install_updates(p.get("paths") or [])
     elif action == "update_ignore":
@@ -2148,6 +2448,7 @@ COMMANDS = {
     "startup": cmd_startup,
     "dupes": cmd_dupes,
     "updates": cmd_updates,
+    "browsers": cmd_browsers,
     "run": cmd_run,
 }
 

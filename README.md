@@ -20,6 +20,7 @@ That's it. Burrow uses the Python that comes with Apple's Command Line Tools. If
 | -------------- | ------------------- | -------------------------------------------------------------------------------------------------- |
 | `bu`           | Burrow              | Lists every command, plus Undo, Empty Trash and how much space Burrow has freed                    |
 | `buupdates`    | App Updates         | Checks every app for a newer version (App Store, Homebrew, Sparkle, Electron, Homebrew's catalog) and installs updates after verifying them |
+| `bubrowsers`   | Browsers            | Clears history, cache, cookies, tabs, form data or passwords (by time range) in every browser, or resets it |
 | `bustatus`     | System Status       | Live health score, CPU, GPU, temperatures, fans, memory, disks, battery, power, network and top processes |
 | `buclean`      | Clean System        | Finds app, browser, developer and system caches, logs, crash reports and old temporary files, and moves them to the Trash |
 | `buoptimize`   | Optimize System     | Flushes DNS, frees memory, rebuilds Launch Services, resets Quick Look and font caches, and more. Developer extras (Homebrew cleanup, Docker prune, unused simulators) appear when those tools are installed |
@@ -67,6 +68,42 @@ Select an app or folder in Alfred's file search and press **→**:
 System-owned items need your password. macOS asks once for all of them. The whole uninstall is one **Undo** step.
 
 Apps with **system extensions** (VPNs, firewalls, antivirus, drivers) are flagged. macOS only removes those from **System Settings → Login Items & Extensions**, or with the developer's uninstaller, which Burrow shows when the app ships one.
+
+## Browsers
+
+`bubrowsers` finds every browser on your Mac by how it stores its data, so browsers that aren't listed here work too:
+
+| Engine | Browsers |
+|---|---|
+| Chromium | Chrome, Brave, Edge, Opera, Vivaldi, Arc, Dia, Comet, Helium, Sigma, Chromium, Yandex, Thorium |
+| Firefox | Firefox, LibreWolf, Floorp, Zen, Tor Browser, Waterfox, Mullvad |
+| WebKit | Safari, Orion |
+
+Pick a browser, switch on what to clean, and choose a time range (last hour, day, week, 4 weeks or all time):
+
+- **Cache**
+- **Browsing history.** Bookmarks are never touched, even in Firefox, which keeps them in the same file.
+- **Download history.** The downloaded files stay.
+- **Cookies and site data.** This signs you out of websites. Site storage can only be cleared for all time.
+- **Open tabs and sessions**
+- **Saved form data.** Addresses and cards are kept.
+- **Saved passwords.** Removing them asks you to confirm a second time.
+
+To reset a browser:
+
+- **Reset settings** restores its defaults and moves extensions to the Trash with the old settings, so Undo brings both back. Bookmarks, history and passwords stay.
+- **Full reset** moves the whole profile to the Trash, as if the browser had just been installed.
+
+**How it keeps your data safe:**
+
+- The browser is quit first, if you agree.
+- Files go to the Trash.
+- Databases that are only partly cleaned get a backup in the Trash first. Undo restores them.
+- If you use sync, anything you delete may come back from your account.
+
+**Safari:** macOS protects Safari's data, so Alfred needs **Full Disk Access** (System Settings → Privacy & Security → Full Disk Access). Burrow shows a button that opens that page. Safari keeps passwords and form data in the Passwords app, so Burrow leaves those alone.
+
+**The Burrow window** (open it from `buupdates`, `bubrowsers` or the menu bar) shows App Updates and Browsers with switches, progress bars and release notes.
 
 ## App updates
 
@@ -169,6 +206,8 @@ Building needs the Swift compiler from Apple's Command Line Tools. It compiles t
 - `src/engine.py` does the scanning and maintenance work.
 - `src/burrow.py` builds what Alfred shows.
 - `src/updates.py` checks for and installs app updates.
+- `src/browsers.py` finds browsers, and cleans or resets them.
+- `tools/window/BurrowWindow.swift` is the Burrow window.
 - `src/run.sh` is the launcher that sets up Python when it's missing.
 - `tools/menubar/BurrowMenu.swift` is the menu bar helper.
 - `tools/trash/BurrowTrash.swift` moves files to the Trash and reports where they went, so they can be put back.

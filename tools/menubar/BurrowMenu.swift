@@ -127,7 +127,8 @@ final class BurrowMenu: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         for (title, query, key) in [
             ("Open System Status", "status", "s"),
-            ("App Updates…", "updates", "u"),
+            ("App Updates…", "window:updates", "u"),
+            ("Browsers…", "window:browsers", "b"),
             ("Clean System…", "clean", "c"),
             ("Analyze Disk…", "analyze", "a"),
             ("Optimize System…", "optimize", "o"),
@@ -148,6 +149,15 @@ final class BurrowMenu: NSObject, NSApplicationDelegate {
 
     @objc func openInAlfred(_ sender: NSMenuItem) {
         guard let query = sender.representedObject as? String else { return }
+        if query.hasPrefix("window:") {
+            // Burrow's own window lives next to this helper: <workflow>/bin/BurrowWindow
+            let workflow = (enginePath as NSString).deletingLastPathComponent
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: workflow + "/bin/BurrowWindow")
+            p.arguments = [workflow, String(query.dropFirst("window:".count))]
+            try? p.run()
+            return
+        }
         var components = URLComponents()
         components.scheme = "alfred"
         components.host = "runtrigger"

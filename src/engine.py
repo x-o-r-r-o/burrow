@@ -361,7 +361,7 @@ def new_batch_id():
     return "{:.6f}-{}".format(time.time(), os.getpid())
 
 
-def trash_paths(paths, finder_fallback=True, label=None, batch_id=None):
+def trash_paths(paths, finder_fallback=True, label=None, batch_id=None, moved_out=None):
     """Move paths to the Trash. Anything the file manager can't move is retried
     through Finder (which can ask for an admin password) in one batch. With a
     label, the move is recorded so it can be undone; calls sharing a batch_id
@@ -379,23 +379,24 @@ def trash_paths(paths, finder_fallback=True, label=None, batch_id=None):
             except (OSError, ValueError, AttributeError):
                 pass  # blocked by Gatekeeper or damaged: use the built-in method below
         if not helper_ok:
-            remaining = [p for p in chunk if os.path.lexists(p)]
+            remaining = [p for p in chunk if os.path.lexists(p) and p not in moved]
+            if remaining and label and not any(os.path.islink(p) for p in remaining):
+                # Undo needs to know where things went: Finder reports it (the JXA method can't)
+                moved.update(_finder_trash(remaining))
+                remaining = [p for p in remaining if os.path.lexists(p)]
             if remaining:
                 subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", TRASH_JXA] + remaining, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     # Whatever still exists wasn't moved, whatever the script reported.
     failed = [p for p in paths if os.path.lexists(p)]
     # Finder resolves symlinks, so it would trash the link's target: never send it links.
+    # (Finder's delete of items on network/FAT volumes may skip the Trash: never there either.)
     via_finder = [p for p in failed if not os.path.islink(p) and not p.startswith("/Volumes/")]
     if finder_fallback and via_finder:
-        cmd = ["/usr/bin/osascript"]
-        for line in FINDER_TRASH:
-            cmd += ["-e", line]
-        res = subprocess.run(cmd + via_finder, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        trashed = [l.rstrip("/") for l in res.stdout.decode("utf-8", "replace").splitlines() if l.strip()]
-        if res.returncode == 0 and len(trashed) == len(via_finder):
-            moved.update(dict(zip(via_finder, trashed)))
+        moved.update(_finder_trash(via_finder))
         failed = [p for p in failed if os.path.lexists(p)]
     moved = {k: v for k, v in moved.items() if not os.path.lexists(k)}
+    if moved_out is not None:
+        moved_out.update(moved)
     if label and moved:
         record_trash_batch(label, moved, batch_id)
     return failed
@@ -418,6 +419,22 @@ def record_trash_batch(label, moved, batch_id=None, root=False):
             history.append({"id": batch_id or new_batch_id(), "time": time.time(), "label": label, "items": new_items})
         return {"batches": history[-TRASH_HISTORY_KEEP:]}
     update_state(TRASH_HISTORY, change)
+
+
+def _finder_trash(paths):
+    """Move items to the Trash through Finder; returns {original: path in Trash}."""
+    cmd = ["/usr/bin/osascript"]
+    for line in FINDER_TRASH:
+        cmd += ["-e", line]
+    res = subprocess.run(cmd + paths, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    trashed = [l.rstrip("/") for l in res.stdout.decode("utf-8", "replace").splitlines() if l.strip()]
+    if res.returncode == 0 and len(trashed) == len(paths):
+        return dict(zip(paths, trashed))
+    return {}
+
+
+def find_trash_batch(batch_id):
+    return next((b for b in load_state(TRASH_HISTORY).get("batches", []) if b.get("id") == batch_id), None)
 
 
 def last_trash_batch():
@@ -444,8 +461,10 @@ def undo_trash_batch(batch):
             skipped.append(dest)  # emptied from the Trash, or already put back
             continue
         if os.path.lexists(dest) and it.get("replace"):
-            # Rolling back an update: the newer version moves to the Trash first
-            if trash_paths([dest], finder_fallback=False):
+            # Rolling back (an update, or a cleaned database): the current version
+            # moves to the Trash first, with a database's -wal/-shm journal files.
+            extras = [dest + s for s in ("-wal", "-shm", "-journal") if os.path.lexists(dest + s)]
+            if trash_paths([dest] + extras, finder_fallback=False):
                 skipped.append(dest)
                 continue
         if os.path.lexists(dest):

@@ -399,8 +399,11 @@ def last_scan_summaries():
     out = {}
     try:
         import updates
+        busy = updates.current_progress()
         n = len(updates.visible_updates())
-        if n:
+        if busy:
+            out["updates"] = "Updating {}…".format(", ".join(e.get("name", "") for e in busy.values()))
+        elif n:
             out["updates"] = "{} available".format(plural(n, "update"))
     except Exception:  # noqa: BLE001
         pass
@@ -1684,11 +1687,14 @@ def cmd_updates(query):
                    "App Store, Homebrew, Sparkle and Electron feeds", icon("search"), valid=False)], rerun=0.5)
         return
     failure = None if running else job.failure()
-    ups = updates.visible_updates(result)
+    busy = updates.current_progress()
+    ups = [u for u in updates.visible_updates(result) if u["path"] not in busy]
     ignored = engine.load_state(updates.IGNORE)
     installable = [u for u in ups if u.get("installable")]
     checked_ago = time_since(result["time"]) if result.get("time") else "never"
 
+    for path, e in sorted(busy.items(), key=lambda kv: kv[1].get("name", "")):
+        items.append(progress_item(path, e))
     if running:
         items.append(item("Checking for Updates… {}s".format(elapsed(job)), "Showing the last results meanwhile", icon("search"), valid=False))
     win = window_item("updates", "Open the Updates Window", "Release notes, update all, roll back, with progress for each app")
@@ -1697,7 +1703,9 @@ def cmd_updates(query):
     if failure and result and ups:
         items.append(item("The Last Check Didn't Finish", "{} · showing results from {} · ↩ Try again".format(failure, checked_ago),
                           icon("warning"), act("rescan", KEYWORDS["updates"] + " ", kind="updates")))
-    if ups and not query:
+    if busy and not ups:
+        pass  # the progress rows say it all
+    elif ups and not query:
         items.append(item(
             "{} Available".format(plural(len(ups), "Update")),
             ("↩ Install {} · checked {}".format(
@@ -1770,7 +1778,36 @@ def cmd_updates(query):
             "Change it in the Workflow’s Configuration · {} apps have no update source".format(result.get("unknown", 0)),
             icon("info"), valid=False,
         ))
-    emit(items, rerun=0.5 if running else None)
+    emit(items, rerun=0.5 if running or busy else None)
+
+
+UPDATE_STAGES = {
+    "starting": "Starting…", "downloading": "Downloading", "verifying": "Checking the download (signature, developer, version)…",
+    "quitting": "Quitting the app…", "installing": "Installing…",
+}
+
+
+def progress_bar(fraction, width=12):
+    filled = int(round(max(0.0, min(1.0, fraction)) * width))
+    return "▓" * filled + "░" * (width - filled)
+
+
+def progress_item(path, e):
+    """A live row for an install that's running (from Alfred, Burrow Companion or the daily run)."""
+    stage = e.get("stage", "starting")
+    title = "Updating {}".format(e.get("name", ""))
+    detail = UPDATE_STAGES.get(stage, stage)
+    if stage == "downloading":
+        done, total = e.get("done", 0), e.get("total", 0)
+        if total:
+            title += "  —  {}%".format(int(done * 100 / total))
+            detail = "Downloading {} · {} of {}".format(progress_bar(done / total), format_bytes(done), format_bytes(total))
+        else:
+            detail = "Downloading · {}".format(format_bytes(done))
+    elif stage in ("installing", "quitting", "verifying"):
+        title += "  —  " + {"installing": "installing", "quitting": "quitting", "verifying": "verifying"}[stage]
+    version = "{} → {}".format(e["installed"], e["version"]) if e.get("installed") else e.get("version", "")
+    return item(title, " · ".join(x for x in (detail, version) if x), file_icon(path), valid=False, uid="progress-" + path)
 
 
 def window_item(section, title, subtitle):
@@ -1795,22 +1832,41 @@ def install_updates(paths):
         msg += "\n\n{} will be quit and reopened.".format(", ".join(running))
     if not confirm("Install {}?".format(plural(len(todo), "update")), msg, "Install"):
         return None
+    # Install in the background and show progress in buupdates while it runs
+    subprocess.Popen(
+        [PYTHON, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import burrow; burrow.update_worker(sys.argv[2:])", WF_DIR]
+        + [u["path"] for u in todo],
+        cwd=WF_DIR, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    time.sleep(0.3)  # let it record the first stage, so buupdates opens on the progress
+    alfred_search(KEYWORDS["updates"] + " ")
+    return None
+
+
+def update_worker(paths):
+    """Installs updates (run in the background by install_updates); notifies when done."""
+    import updates
+    result = engine.load_state(updates.RESULTS)
+    todo = [u for u in updates.visible_updates(result) if u["path"] in paths and u.get("installable")]
     done, failed = [], []
     store = [u for u in todo if u["source"] == "App Store"]
     if store:  # all App Store updates share one password prompt
         try:
-            d, f = updates.install_app_store(store)
+            d, f = updates.install_app_store_tracked(store)
             done += d
             failed += f
         except Exception as e:  # noqa: BLE001
             failed += ["{}: {}".format(u["name"], e) for u in store]
     for u in [u for u in todo if u["source"] != "App Store"]:
         try:
-            done.append(updates.install(u, log=notify))
+            done.append(updates.install(u))
         except Exception as e:  # noqa: BLE001
             failed.append("{}: {}".format(u["name"], e))
     job_for("updates").clear()
-    alfred_search(KEYWORDS["updates"] + " ")
+    notify(update_summary(done, failed))
+
+
+def update_summary(done, failed):
     parts = []
     if done:
         parts.append(done[0] if len(done) == 1 else "Updated {}".format(plural(len(done), "app")))
@@ -2099,7 +2155,7 @@ def cmd_touchid(query):
 # ---------------------------------------------------------------------------
 
 COMPANION_NAME = "Burrow Companion.app"
-COMPANION_URL = "https://github.com/x-o-r-r-o/burrow/releases/latest"
+COMPANION_URL = "https://github.com/x-o-r-r-o/alfred-burrow/releases/latest"
 # Left behind by Burrow 1.1 and earlier, which ran its helpers from inside the workflow
 LEGACY_AGENT = os.path.join(HOME, "Library", "LaunchAgents", "io.github.burrow-alfred.menubar.plist")
 

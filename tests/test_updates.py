@@ -5,6 +5,7 @@ import plistlib
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -78,7 +79,7 @@ class InstallSafetyTest(unittest.TestCase):
         self.root = tempfile.mkdtemp()
         self.real = (updates.download, updates.extract_app, updates.signing, updates.gatekeeper_ok)
         self.new_app = self.make_app("new", "com.example.app", "2.0")
-        updates.download = lambda url, dest, sha256=None: dest
+        updates.download = lambda url, dest, sha256=None, progress=None: dest
         updates.extract_app = lambda archive, work, bid: (self.new_app, lambda: None)
         updates.gatekeeper_ok = lambda p: True
 
@@ -189,6 +190,62 @@ class RollbackTest(unittest.TestCase):
                 engine.undo_trash_batch(batch)
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+
+class ProgressTest(unittest.TestCase):
+    def setUp(self):
+        engine.CACHE_DIR = tempfile.mkdtemp()
+
+    def test_download_reports_progress(self):
+        import http.server
+        import threading
+        body = os.urandom(3 * 1024 * 1024)
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        seen = []
+        try:
+            dest = os.path.join(engine.CACHE_DIR, "file")
+            updates.download("http://127.0.0.1:{}/f".format(server.server_port), dest, progress=lambda d, t: seen.append((d, t)))
+        finally:
+            server.shutdown()
+        self.assertEqual(seen[0], (0, len(body)))
+        self.assertEqual(seen[-1], (len(body), len(body)))
+        self.assertGreater(len(seen), 3)
+
+    def test_progress_is_shared_and_cleared(self):
+        heard = []
+        p = updates.Progress({"path": "/Applications/X.app", "name": "X", "version": "2.0", "installed": "1.0"}, heard.append)
+        p("downloading", 50, 100)
+        now = updates.current_progress()["/Applications/X.app"]
+        self.assertEqual((now["stage"], now["done"], now["total"], now["name"]), ("downloading", 50, 100, "X"))
+        self.assertEqual(heard[-1]["stage"], "downloading")
+        p("installing")
+        self.assertEqual(updates.current_progress()["/Applications/X.app"]["stage"], "installing")
+        p.clear()
+        self.assertEqual(updates.current_progress(), {})
+
+    def test_entries_of_a_finished_process_are_ignored(self):
+        engine.save_state(updates.PROGRESS, {"/Applications/X.app": {"stage": "downloading", "pid": 999999, "t": time.time()}})
+        self.assertEqual(updates.current_progress(), {})
+
+    def test_alfred_row(self):
+        import burrow
+        row = burrow.progress_item("/Applications/X.app", {"name": "X", "stage": "downloading", "done": 45, "total": 100,
+                                                          "installed": "1.0", "version": "2.0"})
+        self.assertEqual(row["title"], "Updating X  —  45%")
+        self.assertIn("1.0 → 2.0", row["subtitle"])
+        self.assertIn("▓", row["subtitle"])
+        self.assertEqual(burrow.progress_item("/Applications/X.app", {"name": "X", "stage": "installing"})["title"], "Updating X  —  installing")
 
 
 if __name__ == "__main__":

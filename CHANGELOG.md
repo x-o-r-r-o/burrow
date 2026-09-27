@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1
+
+- **Update progress:** updates now install in the background and show where they are, in `buupdates`, on the `burrow` hub and in Burrow Companion. You see the download percentage (for example “Updating Spotify — 46% · 120 MB of 260 MB”), then checking, quitting and installing. A notification says when they're done. Burrow Companion also follows installs started from Alfred or the daily check, and **Update all** skips apps that are already updating.
+- The GitHub project is now [x-o-r-r-o/alfred-burrow](https://github.com/x-o-r-r-o/alfred-burrow).
+
 ## 1.5.0
 
 - **Ports** in `bukill`: type `:` (or `ports`, or a port number) to see which program holds each listening port, then end or force quit it, open it in your browser, reveal it or copy its PID. Every user's ports can be shown after one password or Touch ID prompt, and ports held by parts of macOS are marked and ask first.

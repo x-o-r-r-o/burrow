@@ -8,7 +8,7 @@ import ServiceManagement
 import SwiftUI
 
 let workflowBundleID = "io.github.burrow-alfred"
-let releasesURL = URL(string: "https://github.com/x-o-r-r-o/burrow/releases/latest")!
+let releasesURL = URL(string: "https://github.com/x-o-r-r-o/alfred-burrow/releases/latest")!
 var startSection = "updates"
 
 /// The installed Burrow workflow folder (Alfred may keep its preferences in a synced folder).
@@ -130,7 +130,10 @@ final class UpdatesModel: ObservableObject {
     @Published var history: [(id: String, label: String, time: Double)] = []
     @Published var mode = "notify"
     @Published var loading = false
-    @Published var progress: [String: String] = [:]   // path -> "Downloading…" / "Updated" / error
+    @Published var progress: [String: String] = [:]   // path -> "Downloading 45% · …" / "Updated" / error
+    @Published var fraction: [String: Double] = [:]   // path -> download progress 0…1, when known
+    var installing: Set<String> = []                   // installs this window started
+    var elsewhere: Set<String> = []                    // installs started from Alfred or the daily run
     @Published var finished: Set<String> = []
     @Published var message: String?
     @Published var hasMas = true
@@ -164,14 +167,55 @@ final class UpdatesModel: ObservableObject {
     }
 
     func install(_ items: [AppUpdate]) {
-        for u in items { progress[u.id] = "Waiting…" }
+        for u in items { progress[u.id] = "Waiting…"; installing.insert(u.id) }
         runCLI("updates.py", ["install"] + items.map { $0.id }, onLine: { o in
             guard let path = o["path"] as? String else { return }
-            if let d = o["done"] as? String { self.progress[path] = "Updated"; self.finished.insert(path); self.message = d }
-            else if let e = o["error"] as? String { self.progress[path] = "Not updated: " + e }
-            else if let m = o["message"] as? String { self.progress[path] = m }
-            else if o["stage"] as? String == "downloading" { self.progress[path] = "Downloading…" }
-        }, done: { self.load() })
+            if let d = o["done"] as? String {
+                self.progress[path] = "Updated"; self.fraction[path] = nil; self.finished.insert(path); self.message = d
+            } else if let e = o["error"] as? String {
+                self.progress[path] = "Not updated: " + e; self.fraction[path] = nil
+            } else if let stage = o["stage"] as? String {
+                self.show(path, stage: stage, done: o["done_bytes"] as? Double ?? 0, total: o["total"] as? Double ?? 0,
+                          message: o["message"] as? String)
+            }
+        }, done: {
+            for u in items { self.installing.remove(u.id) }
+            self.load()
+        })
+    }
+
+    func show(_ path: String, stage: String, done: Double, total: Double, message: String? = nil) {
+        switch stage {
+        case "downloading":
+            if total > 0 {
+                fraction[path] = min(1, done / total)
+                progress[path] = "Downloading \(Int(done * 100 / total))% · \(formatBytes(done)) of \(formatBytes(total))"
+            } else {
+                fraction[path] = nil
+                progress[path] = "Downloading · \(formatBytes(done))"
+            }
+        case "verifying": fraction[path] = nil; progress[path] = "Checking the download…"
+        case "quitting": fraction[path] = nil; progress[path] = "Quitting the app…"
+        case "installing": fraction[path] = nil; progress[path] = message ?? "Installing…"
+        default: fraction[path] = nil; progress[path] = message ?? "Starting…"
+        }
+    }
+
+    /// Follow installs started from Alfred or the daily run, so they show here too.
+    func pollProgress() {
+        runCLI("updates.py", ["progress"], onLine: { o in
+            let running = o["progress"] as? [String: [String: Any]] ?? [:]
+            for (path, e) in running where !self.installing.contains(path) {
+                self.elsewhere.insert(path)
+                self.show(path, stage: e["stage"] as? String ?? "", done: e["done"] as? Double ?? 0, total: e["total"] as? Double ?? 0)
+            }
+            let ended = self.elsewhere.subtracting(running.keys)
+            if !ended.isEmpty {
+                for path in ended { self.progress[path] = nil; self.fraction[path] = nil }
+                self.elsewhere.subtract(ended)
+                self.load()
+            }
+        })
     }
 
     func simple(_ args: [String]) {
@@ -203,7 +247,12 @@ struct UpdatesView: View {
     var visible: [AppUpdate] {
         ui.filter.isEmpty ? model.updates : model.updates.filter { $0.name.localizedCaseInsensitiveContains(ui.filter) }
     }
-    var installable: [AppUpdate] { model.updates.filter { $0.installable && !model.finished.contains($0.id) } }
+    var installable: [AppUpdate] {
+        model.updates.filter { u in
+            let busy = model.progress[u.id].map { !$0.hasPrefix("Not") } ?? false  // already updating
+            return u.installable && !model.finished.contains(u.id) && !busy
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -270,6 +319,7 @@ struct UpdatesView: View {
             Text("Each download is checked before installing: the same app, the same developer and a valid Apple signature. Old versions go to the Trash, so you can roll back. Open apps are quit and reopened. App Store updates ask for your password once.")
         }
         .onAppear { model.load() }
+        .onReceive(Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()) { _ in model.pollProgress() }
         .onReceive(model.$updates) { list in
             if ui.selection == nil || !list.contains(where: { $0.id == ui.selection }) { ui.selection = list.first?.id }
         }
@@ -286,6 +336,8 @@ struct UpdatesView: View {
             Spacer()
             if model.finished.contains(u.id) {
                 Label("Updated", systemImage: "checkmark").labelStyle(.titleAndIcon).foregroundStyle(.green).font(.caption)
+            } else if let f = model.fraction[u.id] {
+                ProgressView(value: f).frame(width: 90).accessibilityLabel("Downloading \(u.name)")
             } else if let p = model.progress[u.id], !p.hasPrefix("Not") {
                 ProgressView().controlSize(.small)
             } else if u.installable {
@@ -319,10 +371,20 @@ struct UpdatesView: View {
                         Link("Release notes and website", destination: link)
                     }
                     HStack {
-                        if u.installable { Button("Update \(u.name)") { model.install([u]) } }
+                        if u.installable {
+                            Button("Update \(u.name)") { model.install([u]) }
+                                .disabled(model.progress[u.id] != nil && !(model.progress[u.id] ?? "").hasPrefix("Not"))
+                        }
                         else if let url = u.url, let link = URL(string: url) { Button("Open in App Store") { NSWorkspace.shared.open(link) } }
                         Button("Skip \(u.version)") { model.simple(["skip", u.bundleId, u.version]) }
                         Button("Ignore app") { model.simple(["ignore", u.bundleId]) }
+                    }
+                    if let p = model.progress[u.id], !model.finished.contains(u.id) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let f = model.fraction[u.id] { ProgressView(value: f) }
+                            else if !p.hasPrefix("Not") { ProgressView().progressViewStyle(.linear) }
+                            Text(p).font(.callout).foregroundStyle(p.hasPrefix("Not") ? .red : .secondary)
+                        }
                     }
                     if u.installable {
                         Label("The old version goes to the Trash, so you can roll back.", systemImage: "arrow.uturn.backward")

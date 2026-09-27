@@ -10,6 +10,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 import zipfile
 
@@ -20,7 +21,7 @@ DIST = os.path.join(ROOT, "dist")
 
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")) as _f:
     VERSION = _f.read().strip()
-REPO = "x-o-r-r-o/burrow"
+REPO = "x-o-r-r-o/alfred-burrow"
 BUNDLE_ID = "io.github.burrow-alfred"
 
 CMD, ALT, CTRL = 1048576, 524288, 262144
@@ -358,6 +359,13 @@ def main():
         app = build_companion()
         if "--install" in sys.argv:
             dest = "/Applications/Burrow Companion.app"
+            # Quit the running copy, or `open` would just bring the old version forward
+            subprocess.run(["/usr/bin/osascript", "-e", 'tell application id "io.github.burrow-alfred.companion" to quit'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _ in range(20):
+                if subprocess.run(["/usr/bin/pgrep", "-f", dest + "/Contents/MacOS/"], stdout=subprocess.DEVNULL).returncode != 0:
+                    break
+                time.sleep(0.25)
             shutil.rmtree(dest, ignore_errors=True)
             shutil.copytree(app, dest, symlinks=True)
             subprocess.run(["/usr/bin/open", dest])

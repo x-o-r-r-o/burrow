@@ -505,13 +505,20 @@ def gatekeeper_ok(app_path):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120).returncode == 0
 
 
-def download(url, dest, sha256=None, max_bytes=4 * 1024 ** 3):
+def download(url, dest, sha256=None, max_bytes=4 * 1024 ** 3, progress=None):
+    """Download to dest; progress(bytes so far, total or 0) is called as it goes."""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     h = hashlib.sha256()
     size = 0
     with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
+        try:
+            total = int(r.headers.get("Content-Length") or 0)
+        except ValueError:
+            total = 0
+        if progress:
+            progress(0, total)
         while True:
-            chunk = r.read(1024 * 1024)
+            chunk = r.read(256 * 1024)
             if not chunk:
                 break
             size += len(chunk)
@@ -519,6 +526,8 @@ def download(url, dest, sha256=None, max_bytes=4 * 1024 ** 3):
                 raise UpdateError("download is unexpectedly large")
             h.update(chunk)
             f.write(chunk)
+            if progress:
+                progress(size, total)
     if sha256 and h.hexdigest() != sha256.lower():
         raise UpdateError("the download doesn't match Homebrew's checksum")
     return dest
@@ -585,7 +594,7 @@ def _is_dmg(path):
         return False
 
 
-def prepare(update, app=None, log=lambda msg: None):
+def prepare(update, app=None, log=lambda msg: None, report=lambda stage, done=0, total=0: None):
     """Download and verify an update without installing it.
     Returns (path of the verified new app, its info, cleanup function)."""
     app = app or app_info(update["path"])
@@ -598,7 +607,8 @@ def prepare(update, app=None, log=lambda msg: None):
     name = re.sub(r"[^\w.\-]", "_", os.path.basename(update["url"].split("?")[0])) or "download"
     try:
         log("Downloading {} {}…".format(app["name"], update["version"]))
-        archive = download(update["url"], os.path.join(work, name), update.get("sha256"))
+        archive = download(update["url"], os.path.join(work, name), update.get("sha256"),
+                           progress=lambda done, total: report("downloading", done, total))
     except UpdateError:
         shutil.rmtree(work, ignore_errors=True)
         raise
@@ -606,6 +616,7 @@ def prepare(update, app=None, log=lambda msg: None):
         shutil.rmtree(work, ignore_errors=True)
         raise UpdateError("download failed: {}".format(e))
 
+    report("verifying")
     try:
         staged, cleanup = extract_app(archive, work, app["bundle_id"])
     except Exception:
@@ -632,6 +643,60 @@ def prepare(update, app=None, log=lambda msg: None):
     return staged, new, cleanup
 
 
+def install_app_store_tracked(store):
+    """install_app_store, with each app shown as installing while it runs."""
+    trackers = [Progress(u) for u in store]
+    for t in trackers:
+        t("installing")
+    try:
+        return install_app_store(store)
+    finally:
+        for t in trackers:
+            t.clear()
+
+
+PROGRESS = "update-progress.json"
+
+
+class Progress:
+    """Where each install is (downloading 45%, verifying, installing…), written to a
+    shared file so Alfred and Burrow Companion can show it, and passed to `listener`."""
+
+    def __init__(self, update, listener=None):
+        self.path, self.listener, self.last = update["path"], listener, 0
+        self.info = {"name": update.get("name") or os.path.basename(update["path"])[:-4], "version": update.get("version", ""),
+                     "installed": update.get("installed", ""), "pid": os.getpid()}
+
+    def __call__(self, stage, done=0, total=0):
+        now = time.time()
+        if stage == "downloading" and done and now - self.last < 0.4 and done != total:
+            return  # a few updates a second is plenty
+        self.last = now
+        entry = dict(self.info, stage=stage, done=done, total=total, t=now)
+        update_state(PROGRESS, lambda d: dict(d, **{self.path: entry}))
+        if self.listener:
+            self.listener(entry)
+
+    def clear(self):
+        update_state(PROGRESS, lambda d: {k: v for k, v in d.items() if k != self.path})
+
+
+def current_progress():
+    """Installs that are running now: {app path: entry}. Entries left by a process
+    that has gone away are ignored."""
+    out = {}
+    for path, e in load_state(PROGRESS).items():
+        try:
+            os.kill(e.get("pid", 0), 0)
+        except ProcessLookupError:
+            continue
+        except (PermissionError, OverflowError, TypeError):
+            pass
+        if time.time() - e.get("t", 0) < 1800:
+            out[path] = e
+    return out
+
+
 class _AppLock:
     def __init__(self, path):
         import fcntl
@@ -648,27 +713,33 @@ class _AppLock:
         self.fd.close()
 
 
-def install(update, relaunch=True, log=lambda msg: None, unattended=False):
+def install(update, relaunch=True, log=lambda msg: None, unattended=False, listener=None):
     """Download, verify and install one update. Returns a message; raises UpdateError.
-    unattended (the daily run): never quit an app; skip it if it's open by then."""
+    unattended (the daily run): never quit an app; skip it if it's open by then.
+    listener(entry) hears each stage (see Progress)."""
     os.makedirs(engine.CACHE_DIR, exist_ok=True)
     lock = _AppLock(update["path"])
+    report = Progress(update, listener)
     try:
-        return _install(update, relaunch, log, unattended)
+        report("starting")
+        return _install(update, relaunch, log, unattended, report)
     finally:
+        report.clear()
         lock.release()
 
 
-def _install(update, relaunch=True, log=lambda msg: None, unattended=False):
+def _install(update, relaunch=True, log=lambda msg: None, unattended=False, report=lambda stage, done=0, total=0: None):
     app = app_info(update["path"])
     if not os.path.exists(app["path"]):
         raise UpdateError("the app is no longer installed")
     if update["source"] == "App Store":
+        report("installing")
         done, failed = install_app_store([update])
         if failed:
             raise UpdateError(failed[0].split(": ", 1)[1])
         return done[0]
     if update["source"] == "Homebrew":
+        report("installing")
         brew = brew_path()
         res = subprocess.run([brew, "upgrade", "--cask", update["token"]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, HOMEBREW_NO_AUTO_UPDATE="1", PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"), timeout=1800)
@@ -676,14 +747,16 @@ def _install(update, relaunch=True, log=lambda msg: None, unattended=False):
             tail = res.stdout.decode("utf-8", "replace").strip().splitlines()[-1:] or ["brew failed"]
             raise UpdateError("brew upgrade failed: " + tail[0][:150])
         return "{} updated to {} with Homebrew".format(app["name"], update["version"])
-    staged, new, cleanup = prepare(update, app, log)
+    staged, new, cleanup = prepare(update, app, log, report)
     try:
         was_running = engine.app_is_running(app["path"])
         if was_running and unattended:
             raise UpdateError("{} is open, so it'll be updated another time".format(app["name"]))
         if was_running:
+            report("quitting")
             if not engine.quit_app(app["path"], app["bundle_id"]):
                 raise UpdateError("{} didn't quit".format(app["name"]))
+        report("installing")
         label = "Update {} to {}".format(app["name"], new["version"])
         batch = engine.new_batch_id()
         # Old version to the Trash (undoable = roll back), new version into place
@@ -877,7 +950,9 @@ def cli(argv):
             except OSError:
                 pass
     cmd = argv[0] if argv else ""
-    if cmd == "state":
+    if cmd == "progress":
+        say({"progress": current_progress()})
+    elif cmd == "state":
         try:
             say(window_state(check="--check" in argv))
         except Exception as e:  # noqa: BLE001
@@ -889,9 +964,9 @@ def cli(argv):
         store = [u for u in visible_updates(result) if u["path"] in argv[1:] and u.get("source") == "App Store" and u.get("installable")]
         if store:
             for u in store:
-                say({"path": u["path"], "stage": "working", "message": "Updating from the App Store…"})
+                say({"path": u["path"], "stage": "installing", "message": "Updating from the App Store…"})
             try:
-                done, failed = install_app_store(store)
+                done, failed = install_app_store_tracked(store)
                 for u in store:
                     msg = next((d for d in done if d.startswith(u["name"] + " ")), None)
                     say({"path": u["path"], "done": msg} if msg else {"path": u["path"], "error": next((f.split(": ", 1)[1] for f in failed if f.startswith(u["name"] + ":")), "not updated")})
@@ -904,8 +979,7 @@ def cli(argv):
                 say({"path": path, "error": "no update found for this app"})
                 continue
             try:
-                say({"path": path, "stage": "downloading"})
-                msg = install(u, log=lambda m, p=path: say({"path": p, "stage": "working", "message": m}))
+                msg = install(u, listener=lambda e, p=path: say({"path": p, "stage": e["stage"], "done_bytes": e["done"], "total": e["total"]}))
                 say({"path": path, "done": msg})
             except Exception as e:  # noqa: BLE001
                 say({"path": path, "error": str(e)})

@@ -81,7 +81,7 @@ Check every app for a newer version via the `buupdates` keyword.
 | Electron | Apps using electron-updater | Burrow downloads and installs it |
 | Homebrew catalog | Other apps Homebrew knows about | Burrow downloads and installs it |
 
-Before installing, Burrow checks the download is served over HTTPS, is the same app (bundle ID), has a valid signature from the same developer (Team ID), passes Gatekeeper if the current version does, is newer, and runs on your Mac. If any check fails, nothing changes. The old version goes to the Trash, so Undo rolls the update back.
+Before installing, Burrow checks the download is served over HTTPS, is the same app (bundle ID), has a valid signature from the same developer (Team ID), passes Gatekeeper if the current version does, is newer, and runs on your Mac. If any check fails, nothing changes. The old version goes to the Trash, so Undo rolls the update back. Updates install in the background: `buupdates` (and Burrow Companion) show each one's progress, from the download percentage to installing, and a notification says when they're done.
 
 * <kbd>↩</kbd> Update.
 * <kbd>⌘</kbd><kbd>↩</kbd> Release notes.
@@ -168,7 +168,7 @@ Open any command from other apps and scripts with `alfred://runtrigger/io.github
 
 Burrow Companion is a separate app that shows the health score in the menu bar, and opens App Updates, Browsers and the Uninstaller in a window. The Uninstaller lists every app with its size and last use (filter by Unused or Largest), shows everything an app installed with a checkbox to keep any item, and uninstalls or resets it with Undo. Burrow works fully without it.
 
-Download `Burrow-Companion.zip` from the [latest release](https://github.com/x-o-r-r-o/burrow/releases/latest) and move the app to Applications. It isn't notarized by Apple, so the first time, open it, then click **Open Anyway** in **System Settings → Privacy & Security**.
+Download `Burrow-Companion.zip` from the [latest release](https://github.com/x-o-r-r-o/alfred-burrow/releases/latest) and move the app to Applications. It isn't notarized by Apple, so the first time, open it, then click **Open Anyway** in **System Settings → Privacy & Security**.
 
 ![Burrow Companion's Updates window](images/about/companion-updates.png)
 

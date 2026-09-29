@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.0
+
+- **Network** (`bunet`):
+  - Wi-Fi details: band, channel, signal, standard and security. Turn Wi-Fi on or off.
+  - Copy the Wi-Fi password of the current network, or any saved one, with Touch ID or your password. It's marked private so clipboard history skips it, or you can show it instead.
+  - Refresh Wi-Fi, and optionally renew the network address.
+  - Speed test with Apple's `networkQuality`, running in the background.
+  - Public IP and location from ipinfo.io, only when you ask.
+  - Local addresses, router and DNS servers.
+
 ## 1.5.1
 
 - **Update progress:** updates now install in the background and show where they are, in `buupdates`, on the `burrow` hub and in Burrow Companion. You see the download percentage (for example “Updating Spotify — 46% · 120 MB of 260 MB”), then checking, quitting and installing. A notification says when they're done. Burrow Companion also follows installs started from Alfred or the daily check, and **Update all** skips apps that are already updating.

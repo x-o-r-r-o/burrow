@@ -372,7 +372,37 @@ class _ObjC:
             self.lib.objc_autoreleasePoolPop(pool)
 
 
+    def copy_concealed(self, text):
+        """Put text on the clipboard marked concealed (nspasteboard.org), so clipboard
+        managers, including Alfred's Clipboard History, don't keep it."""
+        ctypes.cdll.LoadLibrary("/System/Library/Frameworks/AppKit.framework/AppKit")
+        pool = self.lib.objc_autoreleasePoolPush()
+        try:
+            def nsstring(value):
+                return self.send(ctypes.c_void_p, ctypes.c_char_p)(self.cls("NSString"), self.sel("stringWithUTF8String:"), value.encode("utf-8"))
+            pb = self.send(ctypes.c_void_p)(self.cls("NSPasteboard"), self.sel("generalPasteboard"))
+            self.send(ctypes.c_long)(pb, self.sel("clearContents"))
+            put = self.send(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            ok = put(pb, self.sel("setString:forType:"), nsstring(text), nsstring("public.utf8-plain-text"))
+            put(pb, self.sel("setString:forType:"), nsstring(""), nsstring("org.nspasteboard.ConcealedType"))
+            return bool(ok)
+        finally:
+            self.lib.objc_autoreleasePoolPop(pool)
+
+
 _OBJC = []
+
+
+def copy_concealed(text):
+    try:
+        if not _OBJC:
+            _OBJC.append(_ObjC())
+        if _OBJC[0].copy_concealed(text):
+            return True
+    except (OSError, AttributeError, UnicodeError):
+        pass
+    subprocess.run(["/usr/bin/pbcopy"], input=text.encode("utf-8"))
+    return False
 
 
 def objc_trash(path):
@@ -3438,6 +3468,208 @@ def duplicates(roots, min_size=DUPE_MIN_SIZE):
 
 
 # ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+
+
+def hardware_ports():
+    """[(service name, device)] from networksetup, e.g. ("Wi-Fi", "en0")."""
+    out, name = [], None
+    for line in sh(["/usr/sbin/networksetup", "-listallhardwareports"]).splitlines():
+        if line.startswith("Hardware Port:"):
+            name = line.split(":", 1)[1].strip()
+        elif line.startswith("Device:") and name:
+            out.append((name, line.split(":", 1)[1].strip()))
+            name = None
+    return out
+
+
+def wifi_device():
+    return next((dev for name, dev in hardware_ports() if name in ("Wi-Fi", "AirPort")), None)
+
+
+def wifi_state(dev):
+    """Fast facts about Wi-Fi: power, whether it's connected, security, and the network
+    name when macOS doesn't hide it (it does without Location Services)."""
+    power = sh(["/usr/sbin/networksetup", "-getairportpower", dev]).strip().endswith("On")
+    summary = sh(["/usr/sbin/ipconfig", "getsummary", dev])
+    fields = {}
+    for line in summary.splitlines():
+        if " : " in line:
+            k, _, v = line.strip().partition(" : ")
+            fields.setdefault(k.strip(), v.strip())
+    ssid = fields.get("SSID")
+    return {
+        "power": power,
+        "connected": power and "SSID" in fields,
+        "ssid": None if not ssid or ssid.startswith("<") else ssid,
+        "security": fields.get("Security", "").replace("_", " "),
+        "ip": sh(["/usr/sbin/ipconfig", "getifaddr", dev]).strip(),
+    }
+
+
+def wifi_details():
+    """Channel, band, signal, noise, standard and speed (system_profiler; takes a few seconds)."""
+    try:
+        data = json.loads(sh(["/usr/sbin/system_profiler", "SPAirPortDataType", "-json"], timeout=30) or "{}")
+    except ValueError:
+        return {}
+    for iface in (data.get("SPAirPortDataType") or [{}])[0].get("spairport_airport_interfaces", []):
+        cur = iface.get("spairport_current_network_information")
+        if not cur:
+            continue
+        m = re.match(r"\s*(-?\d+) dBm / (-?\d+) dBm", cur.get("spairport_signal_noise", ""))
+        ch = re.match(r"\s*(\d+)\s*\(([^,)]+)(?:,\s*([^)]+))?\)", str(cur.get("spairport_network_channel", "")))
+        return {
+            "device": iface.get("_name"),
+            "rssi": int(m.group(1)) if m else None, "noise": int(m.group(2)) if m else None,
+            "channel": ch.group(1) if ch else None, "band": ch.group(2) if ch else None, "width": ch.group(3) if ch else None,
+            "phy": cur.get("spairport_network_phymode"), "rate": cur.get("spairport_network_rate"),
+            "security": re.sub(r"^spairport_security_mode_", "", cur.get("spairport_security_mode", "")).replace("_", " "),
+        }
+    return {}
+
+
+def signal_quality(rssi):
+    if rssi is None:
+        return ""
+    return "excellent" if rssi >= -55 else "good" if rssi >= -65 else "fair" if rssi >= -72 else "weak"
+
+
+def local_addresses():
+    """[{device, service, ipv4, ipv6}] for interfaces that have an address (not loopback)."""
+    services = {dev: name for name, dev in hardware_ports()}
+    out, cur = [], None
+    for line in sh(["/sbin/ifconfig"]).splitlines():
+        m = re.match(r"^(\S+): flags=\w+<([^>]*)>", line)
+        if m:
+            cur = {"device": m.group(1), "up": "UP" in m.group(2).split(","), "ipv4": [], "ipv6": []}
+            out.append(cur)
+        elif cur is not None:
+            m4 = re.match(r"\s+inet (\d+\.\d+\.\d+\.\d+)", line)
+            m6 = re.match(r"\s+inet6 ([0-9a-f:]+)", line)
+            if m4:
+                cur["ipv4"].append(m4.group(1))
+            elif m6 and not m6.group(1).startswith("fe80"):
+                cur["ipv6"].append(m6.group(1))
+    rows = []
+    for c in out:
+        if c["up"] and c["device"] != "lo0" and (c["ipv4"] or c["ipv6"]):
+            name = services.get(c["device"]) or ("VPN" if c["device"].startswith(("utun", "ipsec", "ppp")) else c["device"])
+            rows.append({"device": c["device"], "service": name, "ipv4": c["ipv4"], "ipv6": c["ipv6"]})
+    return rows
+
+
+def default_gateway():
+    out = sh(["/sbin/route", "-n", "get", "default"])
+    gw = re.search(r"gateway: (\S+)", out)
+    iface = re.search(r"interface: (\S+)", out)
+    return {"gateway": gw.group(1) if gw else None, "interface": iface.group(1) if iface else None}
+
+
+def dns_servers():
+    servers = []
+    for line in sh(["/usr/sbin/scutil", "--dns"]).splitlines():
+        m = re.match(r"\s+nameserver\[\d+\] : (\S+)", line)
+        if m and m.group(1) not in servers:
+            servers.append(m.group(1))
+        if line.startswith("resolver #2"):
+            break  # the first resolver is the one used for everything else
+    return servers
+
+
+PUBLIC_IP = "public-ip.json"
+PUBLIC_IP_URL = "https://ipinfo.io/json"
+
+
+def public_ip(refresh=False):
+    """Your public IP address and its approximate location, from ipinfo.io (only
+    when you ask; the answer is kept for 10 minutes)."""
+    cached_ip = load_state(PUBLIC_IP)
+    if not refresh and time.time() - cached_ip.get("t", 0) < 600 and cached_ip.get("ip"):
+        return cached_ip
+    import urllib.request
+    req = urllib.request.Request(PUBLIC_IP_URL, headers={"User-Agent": "Burrow (Alfred workflow)", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    info = {k: data.get(k) for k in ("ip", "city", "region", "country", "org", "timezone", "loc", "postal")}
+    info["t"] = time.time()
+    save_state(PUBLIC_IP, info)
+    return info
+
+
+def speed_test():
+    """Apple's networkQuality: download and upload speed and responsiveness (~20 s)."""
+    res = subprocess.run(["/usr/bin/networkQuality", "-c"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    try:
+        data = json.loads(res.stdout.decode("utf-8", "replace") or "{}")
+    except ValueError:
+        data = {}
+    if "dl_throughput" not in data:
+        raise RuntimeError((res.stderr.decode("utf-8", "replace").strip().splitlines() or ["the speed test didn't finish"])[-1])
+    rpm = data.get("responsiveness")
+    return {
+        "download": data.get("dl_throughput"), "upload": data.get("ul_throughput"), "rpm": rpm,
+        "responsiveness": None if rpm is None else "High" if rpm >= 800 else "Medium" if rpm >= 200 else "Low",
+        "latency": data.get("base_rtt"), "interface": data.get("interface_name"), "t": time.time(),
+    }
+
+
+def saved_wifi_networks(dev):
+    """Wi-Fi networks with a saved password, in macOS's preferred order (the network
+    you joined most recently usually comes first). Reading the names needs no password."""
+    names = []
+    dump = sh(["/usr/bin/security", "dump-keychain", "/Library/Keychains/System.keychain"], timeout=20)
+    for block in dump.split("keychain: ")[1:]:
+        if "AirPort network password" not in block:
+            continue
+        m = re.search(r'"acct"<blob>="((?:[^"\\]|\\.)*)"', block)
+        if m and m.group(1) not in names:
+            names.append(m.group(1))
+    preferred = [l.strip() for l in sh(["/usr/sbin/networksetup", "-listpreferredwirelessnetworks", dev]).splitlines()[1:] if l.strip()]
+    order = {n: i for i, n in enumerate(preferred)}
+    return sorted(names, key=lambda n: (order.get(n, len(order)), n.lower()))
+
+
+def wifi_password(ssid):
+    """A saved Wi-Fi network's password from the System keychain (Touch ID or your
+    password). Returns the password, "" when none is saved, or None when cancelled."""
+    import shlex
+    ok, out = run_as_admin(
+        "/usr/bin/security find-generic-password -D 'AirPort network password' -a {} -w /Library/Keychains/System.keychain".format(shlex.quote(ssid)),
+        "Burrow needs your password to show the Wi-Fi password for {}.".format(ssid))
+    if ok is None:
+        return None
+    return out.strip().splitlines()[0] if ok and out.strip() else ""
+
+
+def set_wifi_power(dev, on):
+    res = subprocess.run(["/usr/sbin/networksetup", "-setairportpower", dev, "on" if on else "off"],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+    return res.returncode == 0 and "Error" not in res.stdout.decode("utf-8", "replace")
+
+
+def refresh_wifi(dev, wait=25):
+    """Turn Wi-Fi off and on again, then wait for an address. Returns the new IP or ""."""
+    if not set_wifi_power(dev, False):
+        return None
+    time.sleep(1.5)
+    set_wifi_power(dev, True)
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        ip = sh(["/usr/sbin/ipconfig", "getifaddr", dev]).strip()
+        if ip:
+            return ip
+        time.sleep(1)
+    return ""
+
+
+def renew_dhcp(dev):
+    ok, out = run_as_admin("/usr/sbin/ipconfig set {} DHCP".format(dev), "Burrow needs your password to renew the network address.")
+    return ok
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -3479,6 +3711,14 @@ def main(argv):
             else:
                 ids = [a for a in args if not a.startswith("--")]  # "--run dns fonts" or "dns fonts"
             print(json.dumps(run_optimizations(ids)))
+    elif cmd == "wifi-details":
+        print(json.dumps(wifi_details()))
+    elif cmd == "speedtest":
+        try:
+            print(json.dumps(speed_test()))
+        except Exception as e:  # noqa: BLE001
+            print(json.dumps({"error": str(e)}))
+            return 1
     elif cmd == "touchid":
         sub = args[0] if args else "status"
         if sub == "status":

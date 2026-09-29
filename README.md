@@ -150,6 +150,21 @@ Processes owned by another user (🔒) ask for your password through the standar
 
 ![Processes](images/about/processes.png)
 
+### Network
+
+See your Wi-Fi, speed and addresses via the `bunet` keyword.
+
+* **Wi-Fi** shows the band, channel, signal strength, standard and security. <kbd>⌥</kbd><kbd>↩</kbd> turns Wi-Fi on or off.
+* **Copy Wi-Fi Password** asks for Touch ID or your password, then copies the network's password. It's marked private, so clipboard history (including Alfred's) doesn't keep it. <kbd>⌘</kbd><kbd>↩</kbd> shows it instead. **Wi-Fi Passwords** lists every network you've saved a password for.
+* **Refresh Wi-Fi** turns Wi-Fi off and on to reconnect. <kbd>⌥</kbd><kbd>↩</kbd> also renews the network address (asks for your password).
+* **Test Network Speed** measures download, upload and responsiveness with Apple's `networkQuality` (about 20 seconds, in the background).
+* **Public IP and Location** looks up your public address, approximate location and provider at [ipinfo.io](https://ipinfo.io), only when you ask. <kbd>⌘</kbd><kbd>↩</kbd> shows it on a map.
+* Your local addresses, router and DNS servers. <kbd>↩</kbd> copies; <kbd>⌘</kbd><kbd>↩</kbd> on the router opens its admin page.
+
+macOS hides the current Wi-Fi network's name from apps without Location Services, even with an administrator password. Burrow suggests the network you joined most recently and marks it “probably current”; pick another from **Wi-Fi Passwords** if it's wrong.
+
+![Network](images/about/network.png)
+
 ### More Commands
 
 * `buoptimize` Flush DNS, free memory, rebuild Launch Services, reset Quick Look and font caches. Homebrew, Docker and simulator tasks appear when those are installed.
@@ -178,7 +193,7 @@ Download `Burrow-Companion.zip` from the [latest release](https://github.com/x-o
 
 ## Privacy
 
-Burrow works on your Mac and has no analytics. It only goes online for app updates: it checks the App Store (`itunes.apple.com`), Homebrew (`formulae.brew.sh`), GitHub (for Electron apps) and each app's own update feed, and downloads updates from where each app publishes them.
+Burrow works on your Mac and has no analytics. It only goes online for app updates and two things you ask for in `bunet`. For updates it checks the App Store (`itunes.apple.com`), Homebrew (`formulae.brew.sh`), GitHub (for Electron apps) and each app's own update feed, and downloads updates from where each app publishes them. **Public IP and Location** asks `ipinfo.io`, and **Test Network Speed** uses Apple's servers through `networkQuality`.
 
 ## Credits
 

@@ -35,6 +35,7 @@ SCRIPT_FILTERS = [
     ("clean", "buclean", "Clean System", "Preview and remove caches, logs and temporary files", "clean", "Scanning…"),
     ("optimize", "buoptimize", "Optimize System", "Flush DNS, rebuild databases, refresh services", "optimize", "Checking…"),
     ("processes", "bukill", "Processes", "See what's using CPU and memory, and quit or force quit it", "process", "Reading processes…"),
+    ("network", "bunet", "Network", "Wi-Fi password, refresh Wi-Fi, speed test, public IP and location", "network", "Reading network…"),
     ("uninstall", "buuninstall", "Uninstall App", "Remove apps and their leftover files", "uninstall", "Listing apps…"),
     ("analyze", "buanalyze", "Analyze Disk", "Browse folders sorted by size", "analyze", "Analyzing…"),
     ("purge", "bupurge", "Purge Dev Artifacts", "Remove old node_modules, .next, dist, target, venv…", "purge", "Scanning projects…"),

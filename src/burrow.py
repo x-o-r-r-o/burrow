@@ -45,6 +45,7 @@ DEFAULT_KEYWORDS = {
     "updates": "buupdates",
     "browsers": "bubrowsers",
     "processes": "bukill",
+    "network": "bunet",
 }
 
 
@@ -382,6 +383,7 @@ HUB = [
     ("browsers", "Browsers", "Clear history, cache, cookies and more, or reset a browser", "browser"),
     ("optimize", "Optimize System", "Flush DNS, rebuild databases, refresh services", "optimize"),
     ("processes", "Processes", "See what's using CPU and memory, and quit or force quit it", "process"),
+    ("network", "Network", "Wi-Fi password, refresh Wi-Fi, speed test, public IP and location", "network"),
     ("uninstall", "Uninstall App", "Remove apps and their leftover files", "uninstall"),
     ("analyze", "Analyze Disk", "Browse folders sorted by size", "analyze"),
     ("large", "Large Files", "Find the biggest files in your home folder", "large"),
@@ -1535,6 +1537,186 @@ def proc_restart(p):
 
 
 # ---------------------------------------------------------------------------
+# bunet — Network
+# ---------------------------------------------------------------------------
+
+WIFI_SETTINGS = "x-apple.systempreferences:com.apple.wifi-settings-extension"
+
+
+def format_bps(bps):
+    if not bps:
+        return "–"
+    mbps = bps / 1e6
+    return "{:.0f} Mbps".format(mbps) if mbps >= 100 else "{:.1f} Mbps".format(mbps)
+
+
+def wifi_password_item(ssid, current=False, likely=False):
+    note = "Current network" if current else "Probably the current network" if likely else "Saved network"
+    return item(
+        "Copy Wi-Fi Password  —  {}".format(ssid) if (current or likely) else ssid,
+        "{} · asks for Touch ID or your password · clipboard history skips it · ⌘↩ Show it".format(note),
+        icon("touchid-green"), act("wifi_password", ssid, mode="copy"), uid="net-wifi-pw-" + ssid,
+        mods={"cmd": mod("Show the password for {}".format(ssid), act("wifi_password", ssid, mode="show")),
+              "ctrl": mod("Copy the network name", act("copy", ssid))},
+    )
+
+
+def cmd_wifi_passwords(dev, query):
+    wifi = engine.wifi_state(dev)
+    saved = engine.saved_wifi_networks(dev)
+    items = [item("..", "Back to Network", icon("back"), valid=False, autocomplete="")]
+    if not wifi["ssid"] and wifi["connected"]:
+        items.append(item("Which One Is Current?", "macOS hides the network name from Alfred; the first is usually the one you're on",
+                          icon("info"), valid=False))
+    shown = 0
+    for i, name in enumerate(saved):
+        if matches(query, name):
+            shown += 1
+            items.append(wifi_password_item(name, current=name == wifi["ssid"], likely=not wifi["ssid"] and wifi["connected"] and i == 0))
+    if not shown:
+        items.append(item("No Saved Network Matches" if query else "No Saved Wi-Fi Passwords", "", icon("search"), valid=False))
+    emit(items)
+
+
+def cmd_network(query):
+    dev = engine.wifi_device()
+    if dev and query.lower().startswith("wifi"):
+        return cmd_wifi_passwords(dev, query[4:].strip())
+    items = []
+    rerun = None
+    if dev:
+        wifi = engine.wifi_state(dev)
+        details_job = job_for("wifi-details")
+        details = {}
+        if wifi["connected"]:
+            state = details_job.ensure(engine_argv("wifi-details"), ttl=60, timeout=60)
+            recs = details_job.records()
+            details = recs[-1] if recs else {}
+            if state == "running" and not details:
+                rerun = 0.5
+        if not wifi["power"]:
+            title, sub = "Wi-Fi  —  Off", "↩ Turn Wi-Fi on"
+            action = act("wifi_power", dev, on=True)
+        elif not wifi["connected"]:
+            title, sub = "Wi-Fi  —  Not Connected", "↩ Open Wi-Fi settings · ⌥↩ Turn Wi-Fi off"
+            action = act("open", WIFI_SETTINGS)
+        else:
+            parts = [wifi["ssid"] or "network name hidden by macOS"]
+            if details.get("band"):
+                parts.append("{} · channel {}".format(details["band"].replace("GHz", " GHz"), details.get("channel")))
+            if details.get("rssi") is not None:
+                parts.append("signal {} ({} dBm)".format(engine.signal_quality(details["rssi"]), details["rssi"]))
+            if details.get("phy"):
+                parts.append(details["phy"])
+            if details.get("rate"):
+                parts.append("{} Mbps link".format(details["rate"]))
+            if wifi["security"]:
+                parts.append(wifi["security"])
+            if not details and rerun:
+                parts.append("reading details…")
+            title, sub = "Wi-Fi  —  Connected", " · ".join(parts)
+            action = act("open", WIFI_SETTINGS)
+        items.append(item(title, sub, icon("network"), action, uid="net-wifi",
+                          mods={"alt": mod("Turn Wi-Fi {}".format("off" if wifi["power"] else "on"), act("wifi_power", dev, on=not wifi["power"])),
+                                "cmd": mod("Open Wi-Fi settings", act("open", WIFI_SETTINGS))}))
+        saved = engine.saved_wifi_networks(dev)
+        guess = wifi["ssid"] or (saved[0] if wifi["connected"] and saved else None)
+        if guess:
+            items.append(wifi_password_item(guess, current=bool(wifi["ssid"]), likely=not wifi["ssid"]))
+        if saved:
+            items.append(item(
+                "Wi-Fi Passwords  —  {} saved".format(len(saved)), "Any network you've joined · ↩ Choose one",
+                icon("touchid-green"), valid=False, autocomplete="wifi ", uid="net-wifi-saved"))
+        if wifi["power"]:
+            items.append(item(
+                "Refresh Wi-Fi", "Turns Wi-Fi off and on to reconnect · ⌥↩ Also renew the network address (asks for your password)",
+                icon("refresh"), act("wifi_refresh", dev, renew=False), uid="net-wifi-refresh",
+                mods={"alt": mod("Refresh Wi-Fi and renew the network address (DHCP)", act("wifi_refresh", dev, renew=True))},
+            ))
+
+    speed = job_for("speedtest")
+    sstate = speed.state()
+    recs = speed.records()
+    result = recs[-1] if recs else {}
+    if sstate == "running":
+        items.append(item("Testing Network Speed… {}s".format(elapsed(speed)), "Apple's networkQuality measures download, upload and responsiveness (about 20 seconds)",
+                          icon("search"), valid=False, uid="net-speed"))
+        rerun = 0.5
+    elif result.get("download"):
+        items.append(item(
+            "Speed  —  ↓ {}  ↑ {}".format(format_bps(result["download"]), format_bps(result.get("upload"))),
+            "Responsiveness {} ({} RPM) · tested {} · ↩ Test again".format(
+                result.get("responsiveness") or "–", int(result.get("rpm") or 0), time_since(result.get("t", time.time()))),
+            icon("network"), act("speedtest"), uid="net-speed",
+            text={"copy": "Download {} · Upload {} · {} RPM".format(format_bps(result["download"]), format_bps(result.get("upload")), int(result.get("rpm") or 0))},
+        ))
+    else:
+        failed = speed.failure() or result.get("error")
+        items.append(item("Test Network Speed", ("Last test failed: {} · ".format(failed) if failed else "") + "About 20 seconds, with Apple's networkQuality · ↩ Start",
+                          icon("network"), act("speedtest"), uid="net-speed"))
+
+    pub = engine.load_state(engine.PUBLIC_IP)
+    if pub.get("ip") and time.time() - pub.get("t", 0) < 3600:
+        where = ", ".join(x for x in (pub.get("city"), pub.get("region"), pub.get("country")) if x)
+        items.append(item(
+            "Public IP  {}".format(pub["ip"]),
+            " · ".join(x for x in (where, pub.get("org"), "looked up " + time_since(pub["t"]), "↩ Copy · ⌥↩ Look up again") if x),
+            icon("network"), act("copy", pub["ip"]), uid="net-public",
+            mods={"alt": mod("Look up again (asks ipinfo.io)", act("public_ip")),
+                  "cmd": mod("Show on a map", act("open", "https://maps.apple.com/?ll={}&z=10".format(pub["loc"])) if pub.get("loc") else {}, valid=bool(pub.get("loc")))},
+            text={"copy": pub["ip"], "largetype": "{}\n{}".format(pub["ip"], where)},
+        ))
+    else:
+        items.append(item("Public IP and Location", "↩ Look it up (asks ipinfo.io; nothing else is sent)", icon("network"), act("public_ip"), uid="net-public"))
+
+    for a in engine.local_addresses():
+        addr = (a["ipv4"] or a["ipv6"])[0]
+        extra = [a["device"]] + (["IPv6 " + a["ipv6"][0]] if a["ipv4"] and a["ipv6"] else [])
+        items.append(item("{}  {}".format(a["service"], addr), " · ".join(extra + ["↩ Copy"]), icon("network"), act("copy", addr),
+                          mods={"alt": mod("Copy the IPv6 address", act("copy", a["ipv6"][0]), valid=bool(a["ipv6"]))},
+                          text={"copy": addr, "largetype": "\n".join(a["ipv4"] + a["ipv6"])}, uid="net-if-" + a["device"]))
+    gw = engine.default_gateway()
+    if gw.get("gateway"):
+        items.append(item("Router  {}".format(gw["gateway"]), "via {} · ↩ Copy · ⌘↩ Open its admin page".format(gw.get("interface") or "?"),
+                          icon("network"), act("copy", gw["gateway"]), uid="net-router",
+                          mods={"cmd": mod("Open http://{}".format(gw["gateway"]), act("open", "http://" + gw["gateway"]))}))
+    dns = engine.dns_servers()
+    if dns:
+        items.append(item("DNS  {}".format(", ".join(dns[:3])), "↩ Copy", icon("network"), act("copy", ", ".join(dns)), uid="net-dns"))
+    items = [i for i in items if matches(query, i["title"], i["subtitle"])] or [item("No Matching Network Info", "", icon("search"), valid=False)]
+    emit(items, rerun=rerun)
+
+
+def wifi_password_action(ssid, mode):
+    password = engine.wifi_password(ssid)
+    if password is None:
+        return None
+    if not password:
+        return "Couldn't read the saved password for {}".format(ssid)
+    if mode == "show":
+        osascript(["on run argv", "activate",
+                   'display dialog ("The password for “" & item 1 of argv & "” is:") default answer (item 2 of argv) buttons {"OK"} default button 1 with title "Wi-Fi Password"',
+                   "end run"], ssid, password)
+        return None
+    engine.copy_concealed(password)
+    return "Password for {} copied · clipboard history skips it".format(ssid)
+
+
+def wifi_refresh_action(dev, renew):
+    notify("Refreshing Wi-Fi…")
+    ip = engine.refresh_wifi(dev)
+    if ip is None:
+        return "Couldn't turn Wi-Fi off and on"
+    if renew and ip:
+        if engine.renew_dhcp(dev) is None:
+            return "Wi-Fi reconnected · {} (address not renewed)".format(ip)
+        time.sleep(2)
+        ip = engine.wifi_state(dev)["ip"] or ip
+    job_for("wifi-details").clear()
+    return "Wi-Fi reconnected · {}".format(ip) if ip else "Wi-Fi is back on but hasn't connected yet"
+
+
+# ---------------------------------------------------------------------------
 # budupes — Duplicate Files
 # ---------------------------------------------------------------------------
 
@@ -2430,6 +2612,26 @@ def dispatch(action, target, p):
         if msg:
             alfred_search(KEYWORDS["processes"] + " ")
         return msg
+    elif action == "wifi_password":
+        return wifi_password_action(target, p.get("mode", "copy"))
+    elif action == "wifi_refresh":
+        return wifi_refresh_action(target, bool(p.get("renew")))
+    elif action == "wifi_power":
+        engine.set_wifi_power(target, bool(p.get("on")))
+        job_for("wifi-details").clear()
+        alfred_search(KEYWORDS["network"] + " ")
+        return "Wi-Fi turned {}".format("on" if p.get("on") else "off")
+    elif action == "speedtest":
+        job = job_for("speedtest")
+        job.clear()
+        job.ensure(engine_argv("speedtest"), ttl=10 ** 9, timeout=150)
+        alfred_search(KEYWORDS["network"] + " ")
+    elif action == "public_ip":
+        try:
+            engine.public_ip(refresh=True)
+        except Exception as e:  # noqa: BLE001
+            return "Couldn't look up your public IP: {}".format(e)
+        alfred_search(KEYWORDS["network"] + " ")
     elif action == "quit_all":
         return quit_all(bool(p.get("except_front")))
     elif action == "ports_all":
@@ -2672,6 +2874,7 @@ COMMANDS = {
     "updates": cmd_updates,
     "browsers": cmd_browsers,
     "processes": cmd_processes,
+    "network": cmd_network,
     "run": cmd_run,
 }
 
